@@ -1,0 +1,8 @@
+[package]
+name = "rs-ppmc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arcode = "0.2.4"
+bitbit = "=0.2.0"

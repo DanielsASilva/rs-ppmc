@@ -1,0 +1,51 @@
+<Weblog>
+<CLF:entry>
+ <CLF:host> 203.237.165.17 </CLF:host>
+ <CLF:requestLine> GET /images/apache_logo.gif HTTP/1.0 </CLF:requestLine>
+ <CLF:contentType> image/gif </CLF:contentType>
+ <CLF:statusCode> 200 </CLF:statusCode>
+ <CLF:date> 1997/10/01-00:00:21 </CLF:date>
+ <CLF:byteCount> 0 </CLF:byteCount>
+ <CLF:referer> http://www.apache.org/ </CLF:referer>
+ <CLF:userAgent> Mozilla/4.0 [en] (Win95; I) </CLF:userAgent>
+</CLF:entry>
+<CLF:entry>
+ <CLF:host> 203.172.22.2 </CLF:host>
+ <CLF:requestLine> GET /dist/apache_1.3a1.zip HTTP/1.0 </CLF:requestLine>
+ <CLF:contentType> application/zip </CLF:contentType>
+ <CLF:statusCode> 200 </CLF:statusCode>
+ <CLF:date> 1997/10/01-00:01:11 </CLF:date>
+ <CLF:byteCount> 75776 </CLF:byteCount>
+ <CLF:referer> http://www.davecentral.com/3362.html </CLF:referer>
+ <CLF:userAgent> Mozilla/4.03 [en] (Win95; I) </CLF:userAgent>
+</CLF:entry>
+<CLF:entry>
+ <CLF:host> 203.15.52.20 </CLF:host>
+ <CLF:requestLine> GET /dist/binaries/solaris_2.5.x/apache_1.2.4-sun4m-sun-solaris2.tar.gz HTTP/1.0 </CLF:requestLine>
+ <CLF:contentType> application/x-tar </CLF:contentType>
+ <CLF:statusCode> 200 </CLF:statusCode>
+ <CLF:date> 1997/10/01-00:17:55 </CLF:date>
+ <CLF:byteCount> 874194 </CLF:byteCount>
+ <CLF:referer> http://www.apache.org/dist/binaries/solaris_2.5.x/ </CLF:referer>
+ <CLF:userAgent> Mozilla/3.02 (X11; I; SunOS 5.5.1 sun4m) </CLF:userAgent>
+</CLF:entry>
+<CLF:entry>
+ <CLF:host> 203.97.136.12 </CLF:host>
+ <CLF:requestLine> GET /images/apache_logo.gif HTTP/1.0 </CLF:requestLine>
+ <CLF:contentType> image/gif </CLF:contentType>
+ <CLF:statusCode> 304 </CLF:statusCode>
+ <CLF:date> 1997/10/01-00:00:00 </CLF:date>
+ <CLF:referer> http://www.apache.org/ </CLF:referer>
+ <CLF:userAgent> Mozilla/2.0 (compatible; MSIE 3.02; Windows 95) </CLF:userAgent>
+</CLF:entry>
+<CLF:entry>
+ <CLF:host> 206.75.216.210 </CLF:host>
+ <CLF:requestLine> GET /info/three-config-files.html HTTP/1.0 </CLF:requestLine>
+ <CLF:contentType> text/html </CLF:contentType>
+ <CLF:statusCode> 200 </CLF:statusCode>
+ <CLF:date> 1997/10/01-00:00:00 </CLF:date>
+ <CLF:byteCount> 4260 </CLF:byteCount>
+ <CLF:referer> http://www.apache.org/info/ </CLF:referer>
+ <CLF:userAgent> Mozilla/3.01Gold (Win95; I) </CLF:userAgent>
+</CLF:entry>
+</Weblog>
