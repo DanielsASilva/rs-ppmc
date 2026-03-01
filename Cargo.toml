@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 arcode = "0.2.4"
 bitbit = "=0.2.0"
+indexmap = "2.13.0"

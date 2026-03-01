@@ -1,92 +1,12 @@
 use arcode::bitbit::{BitReader, MSB};
 use arcode::{ArithmeticDecoder, ArithmeticEncoder, EOFKind, Model};
 use bitbit::BitWriter;
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use std::fs::File;
 use std::io::Write;
 use std::io::{Cursor, Result};
 
-#[derive(PartialEq, Eq)]
-enum KValueType {
-    KNegative,
-    KNonNegative,
-}
-
-/// Encodes bytes and returns the compressed form
-fn encode(data: &[u8], qtd_symbols: u32, encode_eof: bool, k_value: KValueType) -> Result<Vec<u8>> {
-    let mut model = match k_value {
-        KValueType::KNegative => Model::builder()
-            .num_symbols(qtd_symbols)
-            .eof(EOFKind::EndAddOne)
-            .pdf(Vec::from(vec![1.0; qtd_symbols as usize]))
-            .build(),
-        KValueType::KNonNegative => Model::builder()
-            .num_symbols(qtd_symbols)
-            .eof(EOFKind::EndAddOne)
-            .pdf(Vec::from(vec![1.0; qtd_symbols as usize]))
-            .build(),
-    };
-
-    // make a stream to collect the compressed data
-    let compressed = Cursor::new(vec![]);
-    let mut compressed_writer = BitWriter::new(compressed);
-
-    let mut encoder = ArithmeticEncoder::new(48);
-    for &sym in data {
-        encoder.encode(sym.into(), &model, &mut compressed_writer)?;
-        if k_value == KValueType::KNonNegative {
-            model.update_symbol(sym.into());
-        }
-    }
-
-    if encode_eof {
-        encoder.encode(model.eof(), &model, &mut compressed_writer)?;
-    }
-    encoder.finish_encode(&mut compressed_writer)?;
-    compressed_writer.pad_to_byte()?;
-
-    // retrieves the bytes from the writer. This will
-    // be cleaner when bitbit updates. Not necessary if
-    // using files or a stream
-    Ok(compressed_writer.get_ref().get_ref().clone())
-}
-
-/// Decompresses the data
-fn decode(data: &[u8], qtd_symbols: u32, k_value: KValueType) -> Result<Vec<u8>> {
-    let mut model = match k_value {
-        KValueType::KNegative => Model::builder()
-            .num_symbols(qtd_symbols)
-            .eof(EOFKind::EndAddOne)
-            .pdf(Vec::from(vec![1.0; qtd_symbols as usize]))
-            .build(),
-        KValueType::KNonNegative => Model::builder()
-            .num_symbols(qtd_symbols)
-            .eof(EOFKind::EndAddOne)
-            .pdf(Vec::from(vec![1.0; qtd_symbols as usize]))
-            .build(),
-    };
-
-    let mut input_reader = BitReader::<_, MSB>::new(data);
-    let mut decoder = ArithmeticDecoder::new(48);
-    let mut decompressed_data = vec![];
-
-    while !decoder.finished() {
-        let sym = decoder.decode(&model, &mut input_reader)?;
-        if k_value == KValueType::KNonNegative {
-            model.update_symbol(sym.into());
-        }
-        decompressed_data.push(sym as u8);
-    }
-
-    decompressed_data.pop(); // remove the EOF
-
-    Ok(decompressed_data)
-}
-
-fn main() {
-    //let mut neg_k_symbols = HashMap::new();
-
-    let sample_text = "\
+static MOCK_TEXT: &[u8] = "\
 [Verse 1: Aviya Dor-Kolan]
 I don't know what I was thinking, leaving my child behind
 Now I suffer the curse, and now I am blind
@@ -135,9 +55,50 @@ The sanity of your mother
 
 [Instrumental Outro]
 "
-    .as_bytes();
+.as_bytes();
 
-    let mut model = Model::builder().num_bits(8).eof(EOFKind::EndAddOne).build();
+/// Encodes bytes and returns the compressed form
+fn encode(data: &[u8]) -> Result<Vec<u8>> {
+    let mut k_negative_elements = IndexMap::new();
+    let mut k_zero_elements: IndexMap<u8, i32> = IndexMap::new();
+
+    for i in 0..256 {
+        k_negative_elements.insert(i as u8, 1);
+    }
+
+    let mut probabilities_k_zero: Vec<f32> = vec![];
+
+    for counter in k_zero_elements.values() {
+        let counter = *counter as f32;
+        let probability = counter / ((k_zero_elements.len() as f32) + 1.0);
+        probabilities_k_zero.push(probability);
+    }
+
+    let mut model_equiprobable = Model::builder()
+        .num_symbols(k_negative_elements.len() as u32)
+        .pdf(vec![1.0; k_negative_elements.len()])
+        .eof(EOFKind::EndAddOne)
+        .build();
+
+    let mut probabilities_k_zero: Vec<f32> = vec![0.0; 256];
+    let mut qtd_elements_k_zero = 0;
+
+    for (value, counter) in &k_zero_elements {
+        let counter = *counter as f32;
+        // +1 no denominador por causa do caracter novo (ou inexistente)
+        let probability = counter / ((k_zero_elements.len() as f32) + 1.0);
+        probabilities_k_zero[(*value) as usize] = probability;
+
+        if counter >= 1.0 {
+            qtd_elements_k_zero = qtd_elements_k_zero + 1;
+        }
+    }
+
+    let mut model_k_zero: Model = Model::builder()
+        .num_symbols(qtd_elements_k_zero)
+        .pdf(probabilities_k_zero)
+        .eof(EOFKind::EndAddOne)
+        .build();
 
     // make a stream to collect the compressed data
     let compressed = Cursor::new(vec![]);
@@ -145,59 +106,180 @@ The sanity of your mother
 
     let mut encoder = ArithmeticEncoder::new(48);
 
-    for &sym in sample_text {
-        encoder
-            .encode(sym.into(), &model, &mut compressed_writer)
-            .expect("Erro ao tentar codificar simbolo {sym}");
-        model.update_symbol(sym.into());
+    for &sym in data {
+        model_equiprobable = Model::builder()
+            .num_symbols(k_negative_elements.len() as u32)
+            .pdf(vec![1.0; k_negative_elements.len()])
+            .eof(EOFKind::EndAddOne)
+            .build();
+
+        let mut probabilities_k_zero: Vec<f32> = vec![0.0; 256];
+        let mut qtd_elements_k_zero = 0;
+
+        for (value, counter) in &k_zero_elements {
+            let counter = *counter as f32;
+            // +1 no denominador por causa do caracter novo (ou inexistente)
+            let probability = counter / ((k_zero_elements.len() as f32) + 1.0);
+            probabilities_k_zero[(*value) as usize] = probability;
+
+            if counter >= 1.0 {
+                qtd_elements_k_zero = qtd_elements_k_zero + 1;
+            }
+        }
+
+        model_k_zero = Model::builder()
+            .num_symbols(qtd_elements_k_zero)
+            .pdf(probabilities_k_zero)
+            .eof(EOFKind::EndAddOne)
+            .build();
+
+        let symb = sym.into();
+
+        if qtd_elements_k_zero == 0 {
+            encoder.encode(sym.into(), &model_equiprobable, &mut compressed_writer)?;
+
+            k_zero_elements.insert(symb, 1);
+            k_negative_elements.swap_remove_full(&symb);
+            continue;
+        }
+
+        if k_zero_elements.contains_key(&symb) {
+            println!("{symb}");
+            for (el, counter) in &k_zero_elements {
+                println!("{el}: {counter}");
+            }
+
+            encoder.encode(sym.into(), &model_k_zero, &mut compressed_writer)?;
+
+            if let Some(x) = k_zero_elements.get_mut(&symb) {
+                *x = *x + 1;
+            }
+        } else {
+            encoder.encode(sym.into(), &model_equiprobable, &mut compressed_writer)?;
+
+            k_zero_elements.insert(symb, 1);
+            k_negative_elements.swap_remove_full(&symb);
+        }
+        // model.update_symbol(sym.into());
     }
 
-    encoder
-        .encode(model.eof(), &model, &mut compressed_writer)
-        .expect("Erro ao codificar EOF");
-    encoder
-        .finish_encode(&mut compressed_writer)
-        .expect("Erro ao finalizar codificação");
-    compressed_writer
-        .pad_to_byte()
-        .expect("Erro ao realizar padding");
+    encoder.encode(model_k_zero.eof(), &model_k_zero, &mut compressed_writer)?;
+    encoder.finish_encode(&mut compressed_writer)?;
+    compressed_writer.pad_to_byte()?;
 
-    let compressed = compressed_writer.get_ref().get_ref().clone();
+    // retrieves the bytes from the writer. This will
+    // be cleaner when bitbit updates. Not necessary if
+    // using files or a stream
+    Ok(compressed_writer.get_ref().get_ref().clone())
+}
 
-    let mut file = File::create("Teste.dd").expect("Não foi possível abrir o arquivo :(");
-    match file.write_all(&compressed) {
-        Ok(_) => println!("Arquivo escrito com sucesso!"),
-        Err(_) => println!("Erro ao escrever o arquivo"),
-    };
+/// Decompresses the data
+fn decode(data: &[u8]) -> Result<Vec<u8>> {
+    let mut k_negative_elements = IndexMap::new();
+    let mut k_zero_elements: IndexMap<u8, i32> = IndexMap::new();
 
-    let mut input_reader = BitReader::<_, MSB>::new(compressed);
+    for i in 0..256 {
+        k_negative_elements.insert(i as u8, 1);
+    }
+
+    let mut probabilities_k_zero: Vec<f32> = vec![];
+
+    for counter in k_zero_elements.values() {
+        let counter = *counter as f32;
+        let probability = counter / k_zero_elements.len() as f32;
+        probabilities_k_zero.push(probability);
+    }
+
+    let mut model_equiprobable: Model;
+
+    let mut model_k_zero: Model;
+
+    let mut input_reader = BitReader::<_, MSB>::new(data);
     let mut decoder = ArithmeticDecoder::new(48);
     let mut decompressed_data = vec![];
 
     while !decoder.finished() {
-        let sym = decoder
-            .decode(&model, &mut input_reader)
-            .except("Erro tentando decodificar simbolo");
-        model.update_symbol(sym);
-        decompressed_data.push(sym as u8);
+        model_equiprobable = Model::builder()
+            .num_symbols(k_negative_elements.len() as u32)
+            .pdf(vec![1.0; k_negative_elements.len()])
+            .eof(EOFKind::EndAddOne)
+            .build();
+
+        let mut probabilities_k_zero: Vec<f32> = vec![0.0; 256];
+        let mut qtd_elements_k_zero = 0;
+
+        for (value, counter) in &k_zero_elements {
+            let counter = *counter as f32;
+            // +1 no denominador por causa do caracter novo (ou inexistente)
+            let probability = counter / ((k_zero_elements.len() as f32) + 1.0);
+            probabilities_k_zero[(*value) as usize] = probability;
+
+            if counter >= 1.0 {
+                qtd_elements_k_zero = qtd_elements_k_zero + 1;
+            }
+        }
+
+        model_k_zero = Model::builder()
+            .num_symbols(qtd_elements_k_zero)
+            .pdf(probabilities_k_zero)
+            .eof(EOFKind::EndAddOne)
+            .build();
+
+        if qtd_elements_k_zero == 0 {
+            let sym = decoder.decode(&model_equiprobable, &mut input_reader)?;
+            let sym = sym as u8;
+
+            k_zero_elements.insert(sym, 1);
+            k_negative_elements.swap_remove_full(&sym);
+            continue;
+        }
+
+        match decoder.decode(&model_k_zero, &mut input_reader) {
+            Ok(sym) => {
+                let sym = sym as u8;
+                decompressed_data.push(sym);
+
+                // Incrementa um no contador do simbolo
+                if let Some(x) = k_zero_elements.get_mut(&sym) {
+                    *x = *x + 1;
+                }
+            }
+            Err(_) => match decoder.decode(&model_equiprobable, &mut input_reader) {
+                Ok(sym) => {
+                    let sym = sym as u8;
+                    decompressed_data.push(sym);
+
+                    k_zero_elements.insert(sym, 1);
+                    k_negative_elements.swap_remove_full(&sym);
+                }
+                Err(_) => println!("Error decompressing data"),
+            },
+        };
+
+        // let sym = decoder.decode(&model_equiprobable, &mut input_reader)?;
+        // model.update_symbol(sym);
+        // decompressed_data.push(sym as u8);
     }
 
     decompressed_data.pop(); // remove the EOF
 
-    // for sym in compressed {
-    //     let v = vec![sym as u8];
+    Ok(decompressed_data)
+}
 
-    //     match decode(&v, 256, KValueType::KNegative) {
-    //         Ok(mut symb) => decompressed.append(&mut symb),
-    //         Err(_) => println!("Erro ao tentar decodificar"),
-    //     }
-    // }
+fn main() {
+    let compressed = encode(MOCK_TEXT).unwrap();
 
-    let mut file = File::create("Decompressed.txt").expect("Não foi possível abrir o arquivo :(");
-    match file.write_all(&decompressed_data) {
-        Ok(_) => println!("Arquivo escrito com sucesso!"),
-        Err(_) => println!("Erro ao escrever o arquivo"),
+    let mut file = File::create("Teste.dd").expect("Erro ao criar arquivo Teste.dd");
+    match file.write_all(&compressed) {
+        Ok(_) => println!("Arquivo comprimido com sucesso!"),
+        Err(_) => println!("Erro ao comprimir arquivo"),
     };
 
-    println!("Hello, world!");
+    let decompressed = decode(&compressed).unwrap();
+
+    let mut file = File::create("Decompressed.txt").expect("Erro ao criar arquivo Decompressed.dd");
+    match file.write_all(&decompressed) {
+        Ok(_) => println!("Arquivo descomprimido com sucesso!"),
+        Err(_) => println!("Erro ao descomprimir arquivo"),
+    };
 }
