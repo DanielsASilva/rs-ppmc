@@ -1,12 +1,13 @@
-use arcode::bitbit::{BitReader, MSB};
-use arcode::{ArithmeticDecoder, ArithmeticEncoder, EOFKind, Model};
-use bitbit::BitWriter;
-use indexmap::IndexMap;
-use std::fs::File;
-use std::io::Write;
-use std::io::{Cursor, Result};
+use std::{
+    fs::File,
+    io::{Cursor, Result, Write},
+};
 
-static MOCK_TEXT: &[u8] = "\
+use arcode::{ArithmeticDecoder, ArithmeticEncoder, EOFKind, Model};
+use bitbit::{BitReader, BitWriter, MSB};
+use indexmap::IndexMap;
+
+static MOCK_TEXT: &str = "\
 [Verse 1: Aviya Dor-Kolan]
 I don't know what I was thinking, leaving my child behind
 Now I suffer the curse, and now I am blind
@@ -54,51 +55,17 @@ So I could ponder
 The sanity of your mother
 
 [Instrumental Outro]
-"
-.as_bytes();
+";
 
 /// Encodes bytes and returns the compressed form
 fn encode(data: &[u8]) -> Result<Vec<u8>> {
-    let mut k_negative_elements = IndexMap::new();
-    let mut k_zero_elements: IndexMap<u8, i32> = IndexMap::new();
+    let mut k_negative_symbols: IndexMap<u8, i32> = IndexMap::new();
+    let mut k_0_symbols: IndexMap<u8, i32> = IndexMap::new();
 
     for i in 0..256 {
-        k_negative_elements.insert(i as u8, 1);
+        let i = i as u8;
+        k_negative_symbols.insert(i, 1);
     }
-
-    let mut probabilities_k_zero: Vec<f32> = vec![];
-
-    for counter in k_zero_elements.values() {
-        let counter = *counter as f32;
-        let probability = counter / ((k_zero_elements.len() as f32) + 1.0);
-        probabilities_k_zero.push(probability);
-    }
-
-    let mut model_equiprobable = Model::builder()
-        .num_symbols(k_negative_elements.len() as u32)
-        .pdf(vec![1.0; k_negative_elements.len()])
-        .eof(EOFKind::EndAddOne)
-        .build();
-
-    let mut probabilities_k_zero: Vec<f32> = vec![0.0; 256];
-    let mut qtd_elements_k_zero = 0;
-
-    for (value, counter) in &k_zero_elements {
-        let counter = *counter as f32;
-        // +1 no denominador por causa do caracter novo (ou inexistente)
-        let probability = counter / ((k_zero_elements.len() as f32) + 1.0);
-        probabilities_k_zero[(*value) as usize] = probability;
-
-        if counter >= 1.0 {
-            qtd_elements_k_zero = qtd_elements_k_zero + 1;
-        }
-    }
-
-    let mut model_k_zero: Model = Model::builder()
-        .num_symbols(qtd_elements_k_zero)
-        .pdf(probabilities_k_zero)
-        .eof(EOFKind::EndAddOne)
-        .build();
 
     // make a stream to collect the compressed data
     let compressed = Cursor::new(vec![]);
@@ -107,63 +74,85 @@ fn encode(data: &[u8]) -> Result<Vec<u8>> {
     let mut encoder = ArithmeticEncoder::new(48);
 
     for &sym in data {
-        model_equiprobable = Model::builder()
-            .num_symbols(k_negative_elements.len() as u32)
-            .pdf(vec![1.0; k_negative_elements.len()])
+        let model = Model::builder()
+            .num_symbols(k_negative_symbols.len() as u32)
             .eof(EOFKind::EndAddOne)
             .build();
 
-        let mut probabilities_k_zero: Vec<f32> = vec![0.0; 256];
-        let mut qtd_elements_k_zero = 0;
+        let mut model_k0 = Model::builder()
+            .num_symbols(k_0_symbols.len() as u32)
+            .eof(EOFKind::EndAddOne)
+            .build();
 
-        for (value, counter) in &k_zero_elements {
-            let counter = *counter as f32;
-            // +1 no denominador por causa do caracter novo (ou inexistente)
-            let probability = counter / ((k_zero_elements.len() as f32) + 1.0);
-            probabilities_k_zero[(*value) as usize] = probability;
-
-            if counter >= 1.0 {
-                qtd_elements_k_zero = qtd_elements_k_zero + 1;
+        let mut i = 0;
+        for (_, counter) in &k_0_symbols {
+            for _ in 1..(*counter) {
+                model_k0.update_symbol(i);
             }
+
+            i = i + 1;
         }
 
-        model_k_zero = Model::builder()
-            .num_symbols(qtd_elements_k_zero)
-            .pdf(probabilities_k_zero)
-            .eof(EOFKind::EndAddOne)
-            .build();
+        if k_0_symbols.len() == 0 {
+            let el_index = k_negative_symbols.get_index_of(&sym).unwrap();
+            let el_index = el_index as u8;
 
-        let symb = sym.into();
+            encoder.encode(el_index.into(), &model, &mut compressed_writer)?;
 
-        if qtd_elements_k_zero == 0 {
-            encoder.encode(sym.into(), &model_equiprobable, &mut compressed_writer)?;
+            let rho: u8 = 255;
+            let eof: u8 = 254;
+            k_0_symbols.insert(sym, 1);
+            k_0_symbols.insert(rho, 1);
+            k_0_symbols.insert(eof, 1);
 
-            k_zero_elements.insert(symb, 1);
-            k_negative_elements.swap_remove_full(&symb);
+            k_negative_symbols.swap_remove(&sym);
+
             continue;
         }
 
-        if k_zero_elements.contains_key(&symb) {
-            println!("{symb}");
-            for (el, counter) in &k_zero_elements {
-                println!("{el}: {counter}");
-            }
+        if k_0_symbols.contains_key(&sym) {
+            let el_index = k_0_symbols.get_index_of(&sym).unwrap();
+            let el_index = el_index as u8;
 
-            encoder.encode(sym.into(), &model_k_zero, &mut compressed_writer)?;
+            encoder.encode(el_index.into(), &model_k0, &mut compressed_writer)?;
+            k_0_symbols[&sym] = k_0_symbols[&sym] + 1;
+        } else if k_negative_symbols.contains_key(&sym) {
+            let rho: u8 = 255;
+            let el_index = k_0_symbols.get_index_of(&rho).unwrap();
+            let el_index = el_index as u8;
 
-            if let Some(x) = k_zero_elements.get_mut(&symb) {
-                *x = *x + 1;
-            }
-        } else {
-            encoder.encode(sym.into(), &model_equiprobable, &mut compressed_writer)?;
+            encoder.encode(el_index.into(), &model_k0, &mut compressed_writer)?;
 
-            k_zero_elements.insert(symb, 1);
-            k_negative_elements.swap_remove_full(&symb);
+            let el_index = k_negative_symbols.get_index_of(&sym).unwrap();
+            let el_index = el_index as u8;
+
+            encoder.encode(el_index.into(), &model, &mut compressed_writer)?;
+
+            k_negative_symbols.swap_remove_entry(&sym);
+            k_0_symbols[&rho] = k_0_symbols[&rho] + 1;
+            k_0_symbols.insert(sym, 1);
         }
-        // model.update_symbol(sym.into());
     }
 
-    encoder.encode(model_k_zero.eof(), &model_k_zero, &mut compressed_writer)?;
+    let mut model_k0 = Model::builder()
+        .num_symbols(k_0_symbols.len() as u32)
+        .eof(EOFKind::EndAddOne)
+        .build();
+
+    let mut i = 0;
+    for (_, counter) in &k_0_symbols {
+        for _ in 1..(*counter) {
+            model_k0.update_symbol(i);
+        }
+
+        i = i + 1;
+    }
+
+    let eof = 254;
+    let el_index = k_0_symbols.get_index_of(&eof).unwrap();
+    let el_index = el_index as u8;
+
+    encoder.encode(el_index.into(), &model_k0, &mut compressed_writer)?;
     encoder.finish_encode(&mut compressed_writer)?;
     compressed_writer.pad_to_byte()?;
 
@@ -175,90 +164,84 @@ fn encode(data: &[u8]) -> Result<Vec<u8>> {
 
 /// Decompresses the data
 fn decode(data: &[u8]) -> Result<Vec<u8>> {
-    let mut k_negative_elements = IndexMap::new();
-    let mut k_zero_elements: IndexMap<u8, i32> = IndexMap::new();
+    let mut k_negative_symbols: IndexMap<u8, i32> = IndexMap::new();
+    let mut k_0_symbols: IndexMap<u8, i32> = IndexMap::new();
 
     for i in 0..256 {
-        k_negative_elements.insert(i as u8, 1);
+        let i = i as u8;
+        k_negative_symbols.insert(i, 1);
     }
-
-    let mut probabilities_k_zero: Vec<f32> = vec![];
-
-    for counter in k_zero_elements.values() {
-        let counter = *counter as f32;
-        let probability = counter / k_zero_elements.len() as f32;
-        probabilities_k_zero.push(probability);
-    }
-
-    let mut model_equiprobable: Model;
-
-    let mut model_k_zero: Model;
 
     let mut input_reader = BitReader::<_, MSB>::new(data);
     let mut decoder = ArithmeticDecoder::new(48);
     let mut decompressed_data = vec![];
 
     while !decoder.finished() {
-        model_equiprobable = Model::builder()
-            .num_symbols(k_negative_elements.len() as u32)
-            .pdf(vec![1.0; k_negative_elements.len()])
+        let model = Model::builder()
+            .num_symbols(k_negative_symbols.len() as u32)
             .eof(EOFKind::EndAddOne)
             .build();
 
-        let mut probabilities_k_zero: Vec<f32> = vec![0.0; 256];
-        let mut qtd_elements_k_zero = 0;
+        let mut model_k0 = Model::builder()
+            .num_symbols(k_0_symbols.len() as u32)
+            .eof(EOFKind::EndAddOne)
+            .build();
 
-        for (value, counter) in &k_zero_elements {
-            let counter = *counter as f32;
-            // +1 no denominador por causa do caracter novo (ou inexistente)
-            let probability = counter / ((k_zero_elements.len() as f32) + 1.0);
-            probabilities_k_zero[(*value) as usize] = probability;
-
-            if counter >= 1.0 {
-                qtd_elements_k_zero = qtd_elements_k_zero + 1;
+        let mut i = 0;
+        for (_, counter) in &k_0_symbols {
+            for _ in 1..(*counter) {
+                model_k0.update_symbol(i);
             }
+            i = i + 1;
         }
 
-        model_k_zero = Model::builder()
-            .num_symbols(qtd_elements_k_zero)
-            .pdf(probabilities_k_zero)
-            .eof(EOFKind::EndAddOne)
-            .build();
+        if k_0_symbols.len() == 0 {
+            let idx = decoder.decode(&model, &mut input_reader)?;
 
-        if qtd_elements_k_zero == 0 {
-            let sym = decoder.decode(&model_equiprobable, &mut input_reader)?;
-            let sym = sym as u8;
+            let value = k_negative_symbols.get_index(idx as usize).unwrap();
+            let sym = *value.0;
 
-            k_zero_elements.insert(sym, 1);
-            k_negative_elements.swap_remove_full(&sym);
+            decompressed_data.push(sym);
+            k_negative_symbols.swap_remove_entry(&sym);
+
+            let rho: u8 = 255;
+            let eof: u8 = 254;
+            k_0_symbols.insert(sym, 1);
+            k_0_symbols.insert(rho, 1);
+            k_0_symbols.insert(eof, 1);
+
             continue;
         }
 
-        match decoder.decode(&model_k_zero, &mut input_reader) {
-            Ok(sym) => {
-                let sym = sym as u8;
-                decompressed_data.push(sym);
+        let idx = decoder.decode(&model_k0, &mut input_reader)?;
+        let value = k_0_symbols.get_index(idx as usize).unwrap();
+        let sym = *value.0;
 
-                // Incrementa um no contador do simbolo
-                if let Some(x) = k_zero_elements.get_mut(&sym) {
-                    *x = *x + 1;
-                }
-            }
-            Err(_) => match decoder.decode(&model_equiprobable, &mut input_reader) {
-                Ok(sym) => {
-                    let sym = sym as u8;
-                    decompressed_data.push(sym);
+        // Verifica se o simbolo codificado é EOF
+        if sym == 254 {
+            decoder.set_finished();
+            continue;
+        }
 
-                    k_zero_elements.insert(sym, 1);
-                    k_negative_elements.swap_remove_full(&sym);
-                }
-                Err(_) => println!("Error decompressing data"),
-            },
-        };
+        // Se o simbolo for rho
+        if sym == 255 {
+            let idx = decoder.decode(&model, &mut input_reader)?;
+            let value = k_negative_symbols.get_index(idx as usize).unwrap();
+            let sym = *value.0;
+            // let test = sym as char;
+            // println!("{test}");
 
-        // let sym = decoder.decode(&model_equiprobable, &mut input_reader)?;
-        // model.update_symbol(sym);
-        // decompressed_data.push(sym as u8);
+            decompressed_data.push(sym);
+
+            k_negative_symbols.swap_remove_entry(&sym);
+
+            k_0_symbols[&(255 as u8)] = k_0_symbols[&(255 as u8)] + 1;
+            k_0_symbols.insert(sym, 1);
+            continue;
+        }
+
+        decompressed_data.push(sym);
+        k_0_symbols[&sym] = k_0_symbols[&sym] + 1;
     }
 
     decompressed_data.pop(); // remove the EOF
@@ -267,19 +250,22 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
 }
 
 fn main() {
-    let compressed = encode(MOCK_TEXT).unwrap();
-
-    let mut file = File::create("Teste.dd").expect("Erro ao criar arquivo Teste.dd");
-    match file.write_all(&compressed) {
-        Ok(_) => println!("Arquivo comprimido com sucesso!"),
-        Err(_) => println!("Erro ao comprimir arquivo"),
-    };
-
+    for i in 1..1 {
+        println!("{i}")
+    }
+    let sample_bytes = MOCK_TEXT.bytes().into_iter().collect::<Vec<u8>>();
+    let compressed = encode(&sample_bytes).unwrap();
     let decompressed = decode(&compressed).unwrap();
 
-    let mut file = File::create("Decompressed.txt").expect("Erro ao criar arquivo Decompressed.dd");
-    match file.write_all(&decompressed) {
-        Ok(_) => println!("Arquivo descomprimido com sucesso!"),
-        Err(_) => println!("Erro ao descomprimir arquivo"),
+    let mut f = File::create("Compressed.dd").expect("Erro ao criar arquivo");
+    match f.write_all(&compressed) {
+        Ok(_) => println!("Comprimido com sucesso!"),
+        Err(_) => println!("Erro ao salvar arquivo comprimido"),
     };
+
+    let mut f = File::create("Decompressed.txt").expect("Erro ao criar arquivo");
+    match f.write_all(&decompressed) {
+        Ok(_) => println!("Comprimido com sucesso"),
+        Err(_) => println!("Erro ao comprimir arquivo"),
+    }
 }
