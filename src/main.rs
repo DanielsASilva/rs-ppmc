@@ -7,7 +7,7 @@ use arcode::{ArithmeticDecoder, ArithmeticEncoder, EOFKind, Model};
 use bitbit::{BitReader, BitWriter, MSB};
 use indexmap::IndexMap;
 
-const MAX_K_CONTEX: usize = 2;
+const MAX_K_CONTEXT: usize = 2;
 
 static MOCK_TEXT: &str = "\
 [Verse 1: Aviya Dor-Kolan]
@@ -63,7 +63,7 @@ The sanity of your mother
 fn encode(data: &[u8]) -> Result<Vec<u8>> {
     let mut k_symbols_models: Vec<IndexMap<u8, i32>> = vec![];
 
-    for _ in 0..MAX_K_CONTEX {
+    for _ in 0..MAX_K_CONTEXT {
         k_symbols_models.push(IndexMap::new());
     }
 
@@ -81,7 +81,7 @@ fn encode(data: &[u8]) -> Result<Vec<u8>> {
     'encoder_loop: for &sym in data {
         let mut models: Vec<Model> = vec![];
 
-        for i in 0..MAX_K_CONTEX {
+        for i in 0..MAX_K_CONTEXT {
             let model = Model::builder()
                 .num_symbols(k_symbols_models[i].len() as u32)
                 .eof(EOFKind::EndAddOne)
@@ -90,7 +90,7 @@ fn encode(data: &[u8]) -> Result<Vec<u8>> {
             models.push(model);
         }
 
-        for _ in 1..MAX_K_CONTEX {
+        for _ in 1..MAX_K_CONTEXT {
             let mut i = 0;
             for (_, counter) in &k_symbols_models[1] {
                 for _ in 1..(*counter) {
@@ -101,7 +101,7 @@ fn encode(data: &[u8]) -> Result<Vec<u8>> {
             }
         }
 
-        for i in (1..MAX_K_CONTEX).rev() {
+        for i in (1..MAX_K_CONTEXT).rev() {
             if k_symbols_models[i - 1].len() == 0 {
                 continue;
             }
@@ -135,27 +135,29 @@ fn encode(data: &[u8]) -> Result<Vec<u8>> {
             }
         }
 
-        if k_symbols_models[1].contains_key(&sym) {
-            let el_index = k_symbols_models[1].get_index_of(&sym).unwrap();
-            let el_index = el_index as u8;
+        for i in (0..MAX_K_CONTEXT).rev() {
+            if k_symbols_models[i].contains_key(&sym) {
+                let el_index = k_symbols_models[i].get_index_of(&sym).unwrap();
+                let el_index = el_index as u8;
 
-            encoder.encode(el_index.into(), &models[1], &mut compressed_writer)?;
-            k_symbols_models[1][&sym] = k_symbols_models[1][&sym] + 1;
-        } else if k_symbols_models[0].contains_key(&sym) {
-            let rho: u8 = 255;
-            let el_index = k_symbols_models[1].get_index_of(&rho).unwrap();
-            let el_index = el_index as u8;
+                encoder.encode(el_index.into(), &models[i], &mut compressed_writer)?;
+                if i == 0 {
+                    k_symbols_models[i].swap_remove_entry(&sym);
+                } else {
+                    k_symbols_models[i][&sym] = k_symbols_models[i][&sym] + 1;
+                }
 
-            encoder.encode(el_index.into(), &models[1], &mut compressed_writer)?;
+                continue 'encoder_loop;
+            } else {
+                let rho: u8 = 255;
+                let el_index = k_symbols_models[i].get_index_of(&rho).unwrap();
+                let el_index = el_index as u8;
 
-            let el_index = k_symbols_models[0].get_index_of(&sym).unwrap();
-            let el_index = el_index as u8;
+                encoder.encode(el_index.into(), &models[1], &mut compressed_writer)?;
 
-            encoder.encode(el_index.into(), &models[0], &mut compressed_writer)?;
-
-            k_symbols_models[0].swap_remove_entry(&sym);
-            k_symbols_models[1][&rho] = k_symbols_models[1][&rho] + 1;
-            k_symbols_models[1].insert(sym, 1);
+                k_symbols_models[1][&rho] = k_symbols_models[1][&rho] + 1;
+                k_symbols_models[1].insert(sym, 1);
+            }
         }
     }
 
@@ -191,7 +193,7 @@ fn encode(data: &[u8]) -> Result<Vec<u8>> {
 fn decode(data: &[u8]) -> Result<Vec<u8>> {
     let mut k_symbols_models: Vec<IndexMap<u8, i32>> = vec![];
 
-    for _ in 0..MAX_K_CONTEX {
+    for _ in 0..MAX_K_CONTEXT {
         k_symbols_models.push(IndexMap::new());
     }
 
@@ -207,7 +209,7 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
     while !decoder.finished() {
         let mut models: Vec<Model> = vec![];
 
-        for i in 0..MAX_K_CONTEX {
+        for i in 0..MAX_K_CONTEXT {
             let model = Model::builder()
                 .num_symbols(k_symbols_models[i].len() as u32)
                 .eof(EOFKind::EndAddOne)
