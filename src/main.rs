@@ -78,7 +78,7 @@ fn encode(data: &[u8]) -> Result<Vec<u8>> {
 
     let mut encoder = ArithmeticEncoder::new(48);
 
-    for &sym in data {
+    'encoder_loop: for &sym in data {
         let mut models: Vec<Model> = vec![];
 
         for i in 0..MAX_K_CONTEX {
@@ -90,30 +90,49 @@ fn encode(data: &[u8]) -> Result<Vec<u8>> {
             models.push(model);
         }
 
-        let mut i = 0;
-        for (_, counter) in &k_symbols_models[1] {
-            for _ in 1..(*counter) {
-                models[1].update_symbol(i);
-            }
+        for _ in 1..MAX_K_CONTEX {
+            let mut i = 0;
+            for (_, counter) in &k_symbols_models[1] {
+                for _ in 1..(*counter) {
+                    models[1].update_symbol(i);
+                }
 
-            i = i + 1;
+                i = i + 1;
+            }
         }
 
-        if k_symbols_models[1].len() == 0 {
-            let el_index = k_symbols_models[0].get_index_of(&sym).unwrap();
-            let el_index = el_index as u8;
+        for i in (1..MAX_K_CONTEX).rev() {
+            if k_symbols_models[i - 1].len() == 0 {
+                continue;
+            }
 
-            encoder.encode(el_index.into(), &models[0], &mut compressed_writer)?;
+            if k_symbols_models[i].len() == 0 {
+                for j in (0..i).rev() {
+                    if !k_symbols_models[j].contains_key(&sym) {
+                        k_symbols_models[j][&255] = k_symbols_models[j][&255] + 1;
+                        continue;
+                    }
 
-            let rho: u8 = 255;
-            let eof: u8 = 254;
-            k_symbols_models[1].insert(sym, 1);
-            k_symbols_models[1].insert(rho, 1);
-            k_symbols_models[1].insert(eof, 1);
+                    let el_index = k_symbols_models[j].get_index_of(&sym).unwrap();
+                    let el_index = el_index as u8;
 
-            k_symbols_models[0].swap_remove(&sym);
+                    encoder.encode(el_index.into(), &models[j], &mut compressed_writer)?;
 
-            continue;
+                    if j == 0 {
+                        k_symbols_models[j].swap_remove(&sym);
+                    } else {
+                        k_symbols_models[j][&sym] = k_symbols_models[j][&sym] + 1;
+                    }
+                }
+
+                let rho: u8 = 255;
+                let eof: u8 = 254;
+                k_symbols_models[i].insert(sym, 1);
+                k_symbols_models[i].insert(rho, 1);
+                k_symbols_models[i].insert(eof, 1);
+
+                continue 'encoder_loop;
+            }
         }
 
         if k_symbols_models[1].contains_key(&sym) {
