@@ -7,6 +7,8 @@ use arcode::{ArithmeticDecoder, ArithmeticEncoder, EOFKind, Model};
 use bitbit::{BitReader, BitWriter, MSB};
 use indexmap::IndexMap;
 
+const MAX_K_CONTEX: usize = 2;
+
 static MOCK_TEXT: &str = "\
 [Verse 1: Aviya Dor-Kolan]
 I don't know what I was thinking, leaving my child behind
@@ -59,12 +61,15 @@ The sanity of your mother
 
 /// Encodes bytes and returns the compressed form
 fn encode(data: &[u8]) -> Result<Vec<u8>> {
-    let mut k_negative_symbols: IndexMap<u8, i32> = IndexMap::new();
-    let mut k_0_symbols: IndexMap<u8, i32> = IndexMap::new();
+    let mut k_symbols_models: Vec<IndexMap<u8, i32>> = vec![];
+
+    for _ in 0..MAX_K_CONTEX {
+        k_symbols_models.push(IndexMap::new());
+    }
 
     for i in 0..256 {
         let i = i as u8;
-        k_negative_symbols.insert(i, 1);
+        k_symbols_models[0].insert(i, 1);
     }
 
     // make a stream to collect the compressed data
@@ -74,73 +79,74 @@ fn encode(data: &[u8]) -> Result<Vec<u8>> {
     let mut encoder = ArithmeticEncoder::new(48);
 
     for &sym in data {
-        let model = Model::builder()
-            .num_symbols(k_negative_symbols.len() as u32)
-            .eof(EOFKind::EndAddOne)
-            .build();
+        let mut models: Vec<Model> = vec![];
 
-        let mut model_k0 = Model::builder()
-            .num_symbols(k_0_symbols.len() as u32)
-            .eof(EOFKind::EndAddOne)
-            .build();
+        for i in 0..MAX_K_CONTEX {
+            let model = Model::builder()
+                .num_symbols(k_symbols_models[i].len() as u32)
+                .eof(EOFKind::EndAddOne)
+                .build();
+
+            models.push(model);
+        }
 
         let mut i = 0;
-        for (_, counter) in &k_0_symbols {
+        for (_, counter) in &k_symbols_models[1] {
             for _ in 1..(*counter) {
-                model_k0.update_symbol(i);
+                models[1].update_symbol(i);
             }
 
             i = i + 1;
         }
 
-        if k_0_symbols.len() == 0 {
-            let el_index = k_negative_symbols.get_index_of(&sym).unwrap();
+        if k_symbols_models[1].len() == 0 {
+            let el_index = k_symbols_models[0].get_index_of(&sym).unwrap();
             let el_index = el_index as u8;
 
-            encoder.encode(el_index.into(), &model, &mut compressed_writer)?;
+            encoder.encode(el_index.into(), &models[0], &mut compressed_writer)?;
 
             let rho: u8 = 255;
             let eof: u8 = 254;
-            k_0_symbols.insert(sym, 1);
-            k_0_symbols.insert(rho, 1);
-            k_0_symbols.insert(eof, 1);
+            k_symbols_models[1].insert(sym, 1);
+            k_symbols_models[1].insert(rho, 1);
+            k_symbols_models[1].insert(eof, 1);
 
-            k_negative_symbols.swap_remove(&sym);
+            k_symbols_models[0].swap_remove(&sym);
 
             continue;
         }
 
-        if k_0_symbols.contains_key(&sym) {
-            let el_index = k_0_symbols.get_index_of(&sym).unwrap();
+        if k_symbols_models[1].contains_key(&sym) {
+            let el_index = k_symbols_models[1].get_index_of(&sym).unwrap();
             let el_index = el_index as u8;
 
-            encoder.encode(el_index.into(), &model_k0, &mut compressed_writer)?;
-            k_0_symbols[&sym] = k_0_symbols[&sym] + 1;
-        } else if k_negative_symbols.contains_key(&sym) {
+            encoder.encode(el_index.into(), &models[1], &mut compressed_writer)?;
+            k_symbols_models[1][&sym] = k_symbols_models[1][&sym] + 1;
+        } else if k_symbols_models[0].contains_key(&sym) {
             let rho: u8 = 255;
-            let el_index = k_0_symbols.get_index_of(&rho).unwrap();
+            let el_index = k_symbols_models[1].get_index_of(&rho).unwrap();
             let el_index = el_index as u8;
 
-            encoder.encode(el_index.into(), &model_k0, &mut compressed_writer)?;
+            encoder.encode(el_index.into(), &models[1], &mut compressed_writer)?;
 
-            let el_index = k_negative_symbols.get_index_of(&sym).unwrap();
+            let el_index = k_symbols_models[0].get_index_of(&sym).unwrap();
             let el_index = el_index as u8;
 
-            encoder.encode(el_index.into(), &model, &mut compressed_writer)?;
+            encoder.encode(el_index.into(), &models[0], &mut compressed_writer)?;
 
-            k_negative_symbols.swap_remove_entry(&sym);
-            k_0_symbols[&rho] = k_0_symbols[&rho] + 1;
-            k_0_symbols.insert(sym, 1);
+            k_symbols_models[0].swap_remove_entry(&sym);
+            k_symbols_models[1][&rho] = k_symbols_models[1][&rho] + 1;
+            k_symbols_models[1].insert(sym, 1);
         }
     }
 
     let mut model_k0 = Model::builder()
-        .num_symbols(k_0_symbols.len() as u32)
+        .num_symbols(k_symbols_models[1].len() as u32)
         .eof(EOFKind::EndAddOne)
         .build();
 
     let mut i = 0;
-    for (_, counter) in &k_0_symbols {
+    for (_, counter) in &k_symbols_models[1] {
         for _ in 1..(*counter) {
             model_k0.update_symbol(i);
         }
@@ -149,7 +155,7 @@ fn encode(data: &[u8]) -> Result<Vec<u8>> {
     }
 
     let eof = 254;
-    let el_index = k_0_symbols.get_index_of(&eof).unwrap();
+    let el_index = k_symbols_models[1].get_index_of(&eof).unwrap();
     let el_index = el_index as u8;
 
     encoder.encode(el_index.into(), &model_k0, &mut compressed_writer)?;
@@ -164,12 +170,15 @@ fn encode(data: &[u8]) -> Result<Vec<u8>> {
 
 /// Decompresses the data
 fn decode(data: &[u8]) -> Result<Vec<u8>> {
-    let mut k_negative_symbols: IndexMap<u8, i32> = IndexMap::new();
-    let mut k_0_symbols: IndexMap<u8, i32> = IndexMap::new();
+    let mut k_symbols_models: Vec<IndexMap<u8, i32>> = vec![];
+
+    for _ in 0..MAX_K_CONTEX {
+        k_symbols_models.push(IndexMap::new());
+    }
 
     for i in 0..256 {
         let i = i as u8;
-        k_negative_symbols.insert(i, 1);
+        k_symbols_models[0].insert(i, 1);
     }
 
     let mut input_reader = BitReader::<_, MSB>::new(data);
@@ -177,44 +186,46 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
     let mut decompressed_data = vec![];
 
     while !decoder.finished() {
-        let model = Model::builder()
-            .num_symbols(k_negative_symbols.len() as u32)
-            .eof(EOFKind::EndAddOne)
-            .build();
+        let mut models: Vec<Model> = vec![];
 
-        let mut model_k0 = Model::builder()
-            .num_symbols(k_0_symbols.len() as u32)
-            .eof(EOFKind::EndAddOne)
-            .build();
+        for i in 0..MAX_K_CONTEX {
+            let model = Model::builder()
+                .num_symbols(k_symbols_models[i].len() as u32)
+                .eof(EOFKind::EndAddOne)
+                .build();
+
+            models.push(model);
+        }
 
         let mut i = 0;
-        for (_, counter) in &k_0_symbols {
+        for (_, counter) in &k_symbols_models[1] {
             for _ in 1..(*counter) {
-                model_k0.update_symbol(i);
+                models[1].update_symbol(i);
             }
+
             i = i + 1;
         }
 
-        if k_0_symbols.len() == 0 {
-            let idx = decoder.decode(&model, &mut input_reader)?;
+        if k_symbols_models[1].len() == 0 {
+            let idx = decoder.decode(&models[0], &mut input_reader)?;
 
-            let value = k_negative_symbols.get_index(idx as usize).unwrap();
+            let value = k_symbols_models[0].get_index(idx as usize).unwrap();
             let sym = *value.0;
 
             decompressed_data.push(sym);
-            k_negative_symbols.swap_remove_entry(&sym);
+            k_symbols_models[0].swap_remove_entry(&sym);
 
             let rho: u8 = 255;
             let eof: u8 = 254;
-            k_0_symbols.insert(sym, 1);
-            k_0_symbols.insert(rho, 1);
-            k_0_symbols.insert(eof, 1);
+            k_symbols_models[1].insert(sym, 1);
+            k_symbols_models[1].insert(rho, 1);
+            k_symbols_models[1].insert(eof, 1);
 
             continue;
         }
 
-        let idx = decoder.decode(&model_k0, &mut input_reader)?;
-        let value = k_0_symbols.get_index(idx as usize).unwrap();
+        let idx = decoder.decode(&models[1], &mut input_reader)?;
+        let value = k_symbols_models[1].get_index(idx as usize).unwrap();
         let sym = *value.0;
 
         // Verifica se o simbolo codificado é EOF
@@ -225,23 +236,23 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
 
         // Se o simbolo for rho
         if sym == 255 {
-            let idx = decoder.decode(&model, &mut input_reader)?;
-            let value = k_negative_symbols.get_index(idx as usize).unwrap();
+            let idx = decoder.decode(&models[0], &mut input_reader)?;
+            let value = k_symbols_models[0].get_index(idx as usize).unwrap();
             let sym = *value.0;
             // let test = sym as char;
             // println!("{test}");
 
             decompressed_data.push(sym);
 
-            k_negative_symbols.swap_remove_entry(&sym);
+            k_symbols_models[0].swap_remove_entry(&sym);
 
-            k_0_symbols[&(255 as u8)] = k_0_symbols[&(255 as u8)] + 1;
-            k_0_symbols.insert(sym, 1);
+            k_symbols_models[1][&(255 as u8)] = k_symbols_models[1][&(255 as u8)] + 1;
+            k_symbols_models[1].insert(sym, 1);
             continue;
         }
 
         decompressed_data.push(sym);
-        k_0_symbols[&sym] = k_0_symbols[&sym] + 1;
+        k_symbols_models[1][&sym] = k_symbols_models[1][&sym] + 1;
     }
 
     decompressed_data.pop(); // remove the EOF
@@ -250,9 +261,6 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
 }
 
 fn main() {
-    for i in 1..1 {
-        println!("{i}")
-    }
     let sample_bytes = MOCK_TEXT.bytes().into_iter().collect::<Vec<u8>>();
     let compressed = encode(&sample_bytes).unwrap();
     let decompressed = decode(&compressed).unwrap();
