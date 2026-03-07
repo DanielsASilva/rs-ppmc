@@ -206,7 +206,7 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
     let mut decoder = ArithmeticDecoder::new(48);
     let mut decompressed_data = vec![];
 
-    while !decoder.finished() {
+    'decoder_loop: while !decoder.finished() {
         let mut models: Vec<Model> = vec![];
 
         for i in 0..MAX_K_CONTEXT {
@@ -218,35 +218,72 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
             models.push(model);
         }
 
-        let mut i = 0;
-        for (_, counter) in &k_symbols_models[1] {
-            for _ in 1..(*counter) {
-                models[1].update_symbol(i);
+        for k in 1..MAX_K_CONTEXT {
+            let mut i = 0;
+            for (_, counter) in &k_symbols_models[k] {
+                for _ in 1..(*counter) {
+                    models[k].update_symbol(i);
+                }
+
+                i = i + 1;
+            }
+        }
+
+        for i in (1..MAX_K_CONTEXT).rev() {
+            if k_symbols_models[i - 1].len() == 0 {
+                continue;
             }
 
-            i = i + 1;
+            if k_symbols_models[i].len() == 0 {
+                let idx = decoder.decode(&models[i - 1], &mut input_reader)?;
+
+                let value = k_symbols_models[i - 1].get_index(idx as usize).unwrap();
+                let sym = *value.0;
+
+                if sym == 255 {
+                    k_symbols_models[i][&255] = k_symbols_models[i][&255] + 1;
+                }
+
+                let mut j = i - 1;
+                while sym == 255 {
+                    let idx = decoder.decode(&models[j], &mut input_reader)?;
+
+                    let value = k_symbols_models[j].get_index(idx as usize).unwrap();
+                    let sym = *value.0;
+
+                    if sym == 255 {
+                        k_symbols_models[j][&255] = k_symbols_models[j][&255] + 1;
+                    }
+
+                    j = j + 1;
+                }
+
+                decompressed_data.push(sym);
+                if j == 0 {
+                    k_symbols_models[i - 1].swap_remove_entry(&sym);
+                } else {
+                    k_symbols_models[j][&sym] = k_symbols_models[j][&sym] + 1;
+                }
+
+                for k in (j + 1)..i {
+                    k_symbols_models[k].insert(sym, 1);
+                }
+
+                let rho: u8 = 255;
+                let eof: u8 = 254;
+                k_symbols_models[i].insert(sym, 1);
+                k_symbols_models[i].insert(rho, 1);
+                k_symbols_models[i].insert(eof, 1);
+
+                continue 'decoder_loop;
+            }
+
+            break;
         }
 
-        if k_symbols_models[1].len() == 0 {
-            let idx = decoder.decode(&models[0], &mut input_reader)?;
-
-            let value = k_symbols_models[0].get_index(idx as usize).unwrap();
-            let sym = *value.0;
-
-            decompressed_data.push(sym);
-            k_symbols_models[0].swap_remove_entry(&sym);
-
-            let rho: u8 = 255;
-            let eof: u8 = 254;
-            k_symbols_models[1].insert(sym, 1);
-            k_symbols_models[1].insert(rho, 1);
-            k_symbols_models[1].insert(eof, 1);
-
-            continue;
-        }
-
-        let idx = decoder.decode(&models[1], &mut input_reader)?;
-        let value = k_symbols_models[1].get_index(idx as usize).unwrap();
+        let mut model_k = MAX_K_CONTEXT - 1;
+        let idx = decoder.decode(&models[model_k], &mut input_reader)?;
+        let value = k_symbols_models[model_k].get_index(idx as usize).unwrap();
         let sym = *value.0;
 
         // Verifica se o simbolo codificado é EOF
@@ -255,21 +292,54 @@ fn decode(data: &[u8]) -> Result<Vec<u8>> {
             continue;
         }
 
-        // Se o simbolo for rho
         if sym == 255 {
-            let idx = decoder.decode(&models[0], &mut input_reader)?;
-            let value = k_symbols_models[0].get_index(idx as usize).unwrap();
-            let sym = *value.0;
-            // let test = sym as char;
-            // println!("{test}");
+            model_k = model_k - 1;
+            let initial_model_k = model_k;
+            let idx = decoder.decode(&models[model_k], &mut input_reader)?;
+            let value = k_symbols_models[model_k].get_index(idx as usize).unwrap();
+            let mut sym = *value.0;
+
+            if sym != 255 {
+                decompressed_data.push(sym);
+
+                if model_k == 0 {
+                    k_symbols_models[0].swap_remove_entry(&sym);
+                } else {
+                    k_symbols_models[model_k][&sym] = k_symbols_models[model_k][&sym] + 1;
+                }
+
+                k_symbols_models[model_k + 1][&(255 as u8)] =
+                    k_symbols_models[model_k + 1][&(255 as u8)] + 1;
+                k_symbols_models[model_k + 1].insert(sym, 1);
+                continue 'decoder_loop;
+            }
+
+            while sym == 255 {
+                k_symbols_models[model_k][&(255 as u8)] =
+                    k_symbols_models[model_k][&(255 as u8)] + 1;
+
+                model_k = model_k - 1;
+
+                let idx = decoder.decode(&models[model_k], &mut input_reader)?;
+                let value = k_symbols_models[model_k].get_index(idx as usize).unwrap();
+                sym = *value.0;
+            }
 
             decompressed_data.push(sym);
 
-            k_symbols_models[0].swap_remove_entry(&sym);
+            if model_k == 0 {
+                k_symbols_models[0].swap_remove_entry(&sym);
+            } else {
+                k_symbols_models[model_k][&sym] = k_symbols_models[model_k][&sym] + 1;
+            }
 
-            k_symbols_models[1][&(255 as u8)] = k_symbols_models[1][&(255 as u8)] + 1;
-            k_symbols_models[1].insert(sym, 1);
-            continue;
+            // k_symbols_models[model_k + 1][&(255 as u8)] =
+            //     k_symbols_models[model_k + 1][&(255 as u8)] + 1;
+            for m in (model_k + 1)..initial_model_k {
+                k_symbols_models[m].insert(sym, 1);
+            }
+
+            continue 'decoder_loop;
         }
 
         decompressed_data.push(sym);
@@ -294,7 +364,7 @@ fn main() {
 
     let mut f = File::create("Decompressed.txt").expect("Erro ao criar arquivo");
     match f.write_all(&decompressed) {
-        Ok(_) => println!("Comprimido com sucesso"),
+        Ok(_) => println!("Descomprimido com sucesso!"),
         Err(_) => println!("Erro ao comprimir arquivo"),
     }
 }
