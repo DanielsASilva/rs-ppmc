@@ -66,7 +66,7 @@ impl PPMC {
 
         let mut last_mean_progressive_length = 0.0;
 
-        let mut current_pos = 0;
+        let mut current_pos = 1;
         for &byte in data {
             let symbol = byte as u32;
             let mut encoded = false;
@@ -132,7 +132,7 @@ impl PPMC {
                     let percentile_mpl_upper_bound = 0.01 * last_mean_progressive_length;
 
                     // If the current mean progressive length is bigger than 1 percent of the last one
-                    if (last_mean_progressive_length - mean_progressive_length)
+                    if (mean_progressive_length - last_mean_progressive_length)
                         > percentile_mpl_upper_bound
                     {
                         self.contexts.clear();
@@ -163,6 +163,10 @@ impl PPMC {
         let mut output: Vec<u8> = Vec::new();
         // Armazena os N últimos caracteres
         let mut last_characters: Vec<u8> = Vec::with_capacity(self.max_n);
+
+        let mut last_mean_progressive_length = 0.0;
+
+        let mut current_pos = 1;
 
         'decode_loop: loop {
             // min() é usado para decodificar corretamente os N primeiros bytes
@@ -208,6 +212,7 @@ impl PPMC {
 
             // Verifica se a compressão acabou
             if decoded_symbol == EOF_SYMBOL {
+                decoder.set_finished();
                 break 'decode_loop;
             }
 
@@ -225,11 +230,32 @@ impl PPMC {
                 }
             }
 
+            // Each time it decodes
+            let total_attributed_bits = reader.get_ref().position();
+            let mean_progressive_length = (total_attributed_bits as f64) / current_pos as f64;
+
+            if current_pos % 1000 == 0 {
+                if last_mean_progressive_length != 0.0 {
+                    let percentile_mpl_upper_bound = 0.01 * last_mean_progressive_length;
+
+                    // If the current mean progressive length is bigger than 1 percent of the last one
+                    if (mean_progressive_length - last_mean_progressive_length)
+                        > percentile_mpl_upper_bound
+                    {
+                        self.contexts.clear();
+                        last_characters = Vec::with_capacity(self.max_n);
+                    }
+                }
+
+                last_mean_progressive_length = mean_progressive_length;
+            }
+
             // Avança para o próximo símbolo
             last_characters.push(byte);
             if last_characters.len() > self.max_n {
                 last_characters.remove(0);
             }
+            current_pos = current_pos + 1;
         }
 
         Ok(output)
@@ -282,6 +308,12 @@ fn main() {
         let ratio = (compressed_size as f64 / original_size as f64) * 100.0;
 
         println!("{:<10} | {:<20} | {:.2}%", n, compressed_size, ratio);
+
+        let cursor = Cursor::new(compressed_bytes.clone());
+        let mut reader = BitReader::<_, MSB>::new(cursor);
+        let mut decoder = ArithmeticDecoder::new(48);
+
+        let decompressed_bytes = ppmc_encoder.decode(&mut decoder, &mut reader).unwrap();
     }
 
     println!("{:-<60}", "");
