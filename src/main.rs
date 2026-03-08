@@ -266,64 +266,63 @@ impl PPMC {
     }
 }
 
-fn main() {
-    let input_path = "corpus/dickens";
+// fn main() {
+//     let input_path = "corpus/dickens";
 
-    println!("Lendo arquivo: {}", input_path);
-    let sample_bytes = match fs::read(input_path) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            eprintln!("Erro ao ler o arquivo '{}': {}", input_path, e);
-            return;
-        }
-    };
+//     println!("Lendo arquivo: {}", input_path);
+//     let sample_bytes = match fs::read(input_path) {
+//         Ok(bytes) => bytes,
+//         Err(e) => {
+//             eprintln!("Erro ao ler o arquivo '{}': {}", input_path, e);
+//             return;
+//         }
+//     };
 
-    let original_size = sample_bytes.len();
-    println!("Tamanho original: {} bytes\n", original_size);
+//     let original_size = sample_bytes.len();
+//     println!("Tamanho original: {} bytes\n", original_size);
 
-    println!("{:-<60}", "");
-    println!(
-        "{:<10} | {:<20} | {:<15}",
-        "Ordem (N)", "Tamanho Comprimido", "Razão (%)"
-    );
-    println!("{:-<60}", "");
+//     println!("{:-<60}", "");
+//     println!(
+//         "{:<10} | {:<20} | {:<15}",
+//         "Ordem (N)", "Tamanho Comprimido", "Razão (%)"
+//     );
+//     println!("{:-<60}", "");
 
-    for n in 1..=10 {
-        let mut ppmc_encoder = PPMC::new(n);
-        let compressed_cursor = Cursor::new(Vec::new());
-        let mut writer = BitWriter::new(compressed_cursor);
-        let mut encoder = ArithmeticEncoder::new(48);
+//     for n in 1..=10 {
+//         let mut ppmc_encoder = PPMC::new(n);
+//         let compressed_cursor = Cursor::new(Vec::new());
+//         let mut writer = BitWriter::new(compressed_cursor);
+//         let mut encoder = ArithmeticEncoder::new(48);
 
-        // Executa a compressão
-        ppmc_encoder
-            .encode(&sample_bytes, &mut encoder, &mut writer)
-            .unwrap();
+//         // Executa a compressão
+//         ppmc_encoder
+//             .encode(&sample_bytes, &mut encoder, &mut writer)
+//             .unwrap();
 
-        // Finaliza o bitstream
-        encoder
-            .encode(EOF_SYMBOL, &ppmc_encoder.minus_one, &mut writer)
-            .unwrap();
-        encoder.finish_encode(&mut writer).unwrap();
-        writer.pad_to_byte().unwrap();
+//         // Finaliza o bitstream
+//         encoder
+//             .encode(EOF_SYMBOL, &ppmc_encoder.minus_one, &mut writer)
+//             .unwrap();
+//         encoder.finish_encode(&mut writer).unwrap();
+//         writer.pad_to_byte().unwrap();
 
-        // Calcula os resultados
-        let compressed_bytes = writer.get_ref().get_ref().clone();
-        let compressed_size = compressed_bytes.len();
-        let ratio = (compressed_size as f64 / original_size as f64) * 100.0;
+//         // Calcula os resultados
+//         let compressed_bytes = writer.get_ref().get_ref().clone();
+//         let compressed_size = compressed_bytes.len();
+//         let ratio = (compressed_size as f64 / original_size as f64) * 100.0;
 
-        println!("{:<10} | {:<20} | {:.2}%", n, compressed_size, ratio);
+//         println!("{:<10} | {:<20} | {:.2}%", n, compressed_size, ratio);
 
-        let cursor = Cursor::new(compressed_bytes.clone());
-        let mut reader = BitReader::<_, MSB>::new(cursor);
-        let mut decoder = ArithmeticDecoder::new(48);
+//         let cursor = Cursor::new(compressed_bytes.clone());
+//         let mut reader = BitReader::<_, MSB>::new(cursor);
+//         let mut decoder = ArithmeticDecoder::new(48);
 
-        let decompressed_bytes = ppmc_encoder.decode(&mut decoder, &mut reader).unwrap();
-    }
+//         let decompressed_bytes = ppmc_encoder.decode(&mut decoder, &mut reader).unwrap();
+//     }
 
-    println!("{:-<60}", "");
-}
+//     println!("{:-<60}", "");
+// }
 
-/*
 fn main() {
     let input_path = "corpus/dickens";
 
@@ -347,10 +346,14 @@ fn main() {
     let mut encoder = ArithmeticEncoder::new(48);
 
     println!("Comprimindo...");
-    ppmc_encoder.encode(&sample_bytes, &mut encoder, &mut writer).unwrap();
+    ppmc_encoder
+        .encode(&sample_bytes, &mut encoder, &mut writer)
+        .unwrap();
 
     const EOF_SYMBOL: u32 = 257;
-    encoder.encode(EOF_SYMBOL, &ppmc_encoder.minus_one, &mut writer).unwrap();
+    encoder
+        .encode(EOF_SYMBOL, &ppmc_encoder.minus_one, &mut writer)
+        .unwrap();
     encoder.finish_encode(&mut writer).unwrap();
     writer.pad_to_byte().unwrap();
 
@@ -359,7 +362,10 @@ fn main() {
     // Escrevendo arquivo comprimido
     let mut f_comp = File::create("Compressed.dd").expect("Erro ao criar arquivo");
     match f_comp.write_all(&compressed_bytes) {
-        Ok(_) => println!("Comprimido com sucesso! Tamanho final: {} bytes", compressed_bytes.len()),
+        Ok(_) => println!(
+            "Comprimido com sucesso! Tamanho final: {} bytes",
+            compressed_bytes.len()
+        ),
         Err(_) => println!("Erro ao salvar arquivo comprimido"),
     };
 
@@ -385,4 +391,4 @@ fn main() {
     } else {
         println!("Os bytes descomprimidos não batem com os originais!");
     }
-}*/
+}
