@@ -66,7 +66,8 @@ impl PPMC {
         let mut last_characters: Vec<u8> = Vec::with_capacity(self.max_n);
 
         let mut last_mean_progressive_length = 0.0;
-        let mut last_window_bit_count = 0;
+
+        let mut last_total_attributed_bits = 0;
 
         let mut current_pos = 1;
         for &byte in data {
@@ -130,24 +131,27 @@ impl PPMC {
             metrics.push((current_pos, mean_progressive_length));
 
             if current_pos % 1000 == 0 {
-                let window_bit_count = total_attributed_bits - last_window_bit_count;
+                let window_bit_count = total_attributed_bits - last_total_attributed_bits;
                 // Get mean progressive length of window
                 let mean_progressive_length = (window_bit_count as f64) / 1000.0;
 
                 if last_mean_progressive_length != 0.0 {
-                    let percentile_mpl_upper_bound = 0.01 * last_mean_progressive_length;
+                    let percentile_mpl_upper_bound =
+                        last_mean_progressive_length + 0.25 * last_mean_progressive_length;
 
                     // If the current mean progressive length is bigger than 1 percent of the last one
-                    if (last_mean_progressive_length - mean_progressive_length)
-                        > percentile_mpl_upper_bound
-                    {
+                    if mean_progressive_length > percentile_mpl_upper_bound {
                         self.contexts.clear();
                         last_characters = Vec::with_capacity(self.max_n);
+                        // println!(
+                        //     "[{current_pos}] {} - {}",
+                        //     mean_progressive_length, last_mean_progressive_length
+                        // );
                     }
                 }
 
                 last_mean_progressive_length = mean_progressive_length;
-                last_window_bit_count = window_bit_count;
+                last_total_attributed_bits = total_attributed_bits;
             }
 
             // Avança para o próximo símbolo
@@ -176,9 +180,10 @@ impl PPMC {
         let mut last_characters: Vec<u8> = Vec::with_capacity(self.max_n);
 
         let mut last_mean_progressive_length = 0.0;
-        let mut last_window_bit_count = 0;
 
         let mut current_pos = 1;
+
+        let mut last_total_attributed_bits = 0;
 
         'decode_loop: loop {
             // min() é usado para decodificar corretamente os N primeiros bytes
@@ -244,24 +249,23 @@ impl PPMC {
 
             if current_pos % 1000 == 0 {
                 let total_attributed_bits = reader.get_ref().position();
-                let window_bit_count = total_attributed_bits - last_window_bit_count;
+                let window_bit_count = total_attributed_bits - last_total_attributed_bits;
                 // Get mean progressive length of window
                 let mean_progressive_length = (window_bit_count as f64) / 1000.0;
 
                 if last_mean_progressive_length != 0.0 {
-                    let percentile_mpl_upper_bound = 0.01 * last_mean_progressive_length;
+                    let percentile_mpl_upper_bound =
+                        last_mean_progressive_length + 0.25 * last_mean_progressive_length;
 
                     // If the current mean progressive length is bigger than 1 percent of the last one
-                    if (last_mean_progressive_length - mean_progressive_length)
-                        > percentile_mpl_upper_bound
-                    {
+                    if mean_progressive_length > percentile_mpl_upper_bound {
                         self.contexts.clear();
                         last_characters = Vec::with_capacity(self.max_n);
                     }
                 }
 
                 last_mean_progressive_length = mean_progressive_length;
-                last_window_bit_count = window_bit_count;
+                last_total_attributed_bits = total_attributed_bits;
             }
 
             // Avança para o próximo símbolo
