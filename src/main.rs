@@ -63,7 +63,8 @@ impl PPMC {
         // Armazena os N últimos caracteres
         // Ex: N = 3 ['e', 'n', 's']
         let mut last_characters: Vec<u8> = Vec::with_capacity(self.max_n);
-        let mut total_attributed_bits;
+
+        let mut last_mean_progressive_length = 0.0;
 
         let mut current_pos = 0;
         for &byte in data {
@@ -121,15 +122,26 @@ impl PPMC {
             }
 
             // Add metrics to file
-            total_attributed_bits = writer.get_ref().position();
-            metrics_file.write(
-                (format!(
-                    "{},{}\n",
-                    current_pos,
-                    (total_attributed_bits as f64) / current_pos as f64
-                ))
-                .as_bytes(),
-            )?;
+            let total_attributed_bits = writer.get_ref().position();
+            let mean_progressive_length = (total_attributed_bits as f64) / current_pos as f64;
+            metrics_file
+                .write((format!("{},{}\n", current_pos, mean_progressive_length)).as_bytes())?;
+
+            if current_pos % 1000 == 0 {
+                if last_mean_progressive_length != 0.0 {
+                    let percentile_mpl_upper_bound = 0.01 * last_mean_progressive_length;
+
+                    // If the current mean progressive length is bigger than 1 percent of the last one
+                    if (last_mean_progressive_length - mean_progressive_length)
+                        > percentile_mpl_upper_bound
+                    {
+                        self.contexts.clear();
+                        last_characters = Vec::with_capacity(self.max_n);
+                    }
+                }
+
+                last_mean_progressive_length = mean_progressive_length;
+            }
 
             // Avança para o próximo símbolo
             last_characters.push(byte);
