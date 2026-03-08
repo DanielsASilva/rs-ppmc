@@ -60,6 +60,7 @@ impl PPMC {
         let mut metrics_file = File::create(format!("metrics_order_{}.csv", self.max_n))
             .expect("Erro ao escrever arquivo de métrica");
         metrics_file.write(b"n,comprimento_medio\n")?;
+        let mut metrics: Vec<(i32, f64)> = vec![];
         // Armazena os N últimos caracteres
         // Ex: N = 3 ['e', 'n', 's']
         let mut last_characters: Vec<u8> = Vec::with_capacity(self.max_n);
@@ -124,8 +125,7 @@ impl PPMC {
             // Add metrics to file
             let total_attributed_bits = writer.get_ref().position();
             let mean_progressive_length = (total_attributed_bits as f64) / current_pos as f64;
-            metrics_file
-                .write((format!("{},{}\n", current_pos, mean_progressive_length)).as_bytes())?;
+            metrics.push((current_pos, mean_progressive_length));
 
             if current_pos % 1000 == 0 {
                 if last_mean_progressive_length != 0.0 {
@@ -150,6 +150,10 @@ impl PPMC {
             }
 
             current_pos = current_pos + 1;
+        }
+
+        for metric in metrics {
+            metrics_file.write((format!("{},{}\n", metric.0, metric.1)).as_bytes())?;
         }
 
         Ok(())
