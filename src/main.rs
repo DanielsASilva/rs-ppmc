@@ -1,370 +1,303 @@
 use std::{
-    fs::File,
+    fs::{self, File},
     io::{Cursor, Result, Write},
+    collections::{HashMap, HashSet},
+    cmp::min,
 };
-
 use arcode::{ArithmeticDecoder, ArithmeticEncoder, EOFKind, Model};
 use bitbit::{BitReader, BitWriter, MSB};
-use indexmap::IndexMap;
 
-const MAX_K_CONTEXT: usize = 2;
+const RHO: u32 = 256;
+const EOF_SYMBOL: u32 = 257;
 
-static MOCK_TEXT: &str = "\
-[Verse 1: Aviya Dor-Kolan]
-I don't know what I was thinking, leaving my child behind
-Now I suffer the curse, and now I am blind
-With all this anger, guilt, and sadness coming to haunt me forever
-I can't wait for the cliff at the end of the river
-
-[Verse 2: Aviya Dor-Kolan]
-Is this revenge I am seeking, or seeking someone to avenge me?
-Stuck in my own paradox, I wanna set myself free
-Maybe I should chase and find before they'll try to stop it
-It won't be long before I'll become a puppet
-
-[Chorus: Aviya Dor-Kolan]
-It's been so long
-Since I last have seen my son
-Lost to this monster
-To the man behind the slaughter
-Since you've been gone
-I've been singing this stupid song
-So I could ponder
-The sanity of your mother
-
-[Instrumental Interlude]
-
-[Verse 3: Aviya Dor-Kolan]
-I wish I lived in the present with the gift of my past mistakes
-But the future keeps luring in like a pack of snakes
-Your sweet little eyes, your little smile is all I remember
-Those fuzzy memories mess with my temper
-
-[Verse 4: Aviya Dor-Kolan]
-Justification is killing me, but killing isn't justified
-What happened to my son? I'm terrified
-It lingers in my mind, and the thought keeps on getting bigger
-I'm sorry, my sweet baby, I wish I'd been there
-
-[Chorus: Aviya Dor-Kolan]
-It's been so long
-Since I last have seen my son
-Lost to this monster
-To the man behind the slaughter
-Since you've been gone
-I've been singing this stupid song
-So I could ponder
-The sanity of your mother
-
-[Instrumental Outro]
-";
-
-/// Encodes bytes and returns the compressed form
-fn encode(data: &[u8]) -> Result<Vec<u8>> {
-    let mut k_symbols_models: Vec<IndexMap<u8, i32>> = vec![];
-
-    for _ in 0..MAX_K_CONTEXT {
-        k_symbols_models.push(IndexMap::new());
-    }
-
-    for i in 0..256 {
-        let i = i as u8;
-        k_symbols_models[0].insert(i, 1);
-    }
-
-    // make a stream to collect the compressed data
-    let compressed = Cursor::new(vec![]);
-    let mut compressed_writer = BitWriter::new(compressed);
-
-    let mut encoder = ArithmeticEncoder::new(48);
-
-    'encoder_loop: for &sym in data {
-        let mut models: Vec<Model> = vec![];
-
-        for i in 0..MAX_K_CONTEXT {
-            let model = Model::builder()
-                .num_symbols(k_symbols_models[i].len() as u32)
-                .eof(EOFKind::EndAddOne)
-                .build();
-
-            models.push(model);
-        }
-
-        for _ in 1..MAX_K_CONTEXT {
-            let mut i = 0;
-            for (_, counter) in &k_symbols_models[1] {
-                for _ in 1..(*counter) {
-                    models[1].update_symbol(i);
-                }
-
-                i = i + 1;
-            }
-        }
-
-        for i in (1..MAX_K_CONTEXT).rev() {
-            if k_symbols_models[i - 1].len() == 0 {
-                continue;
-            }
-
-            if k_symbols_models[i].len() == 0 {
-                for j in (0..i).rev() {
-                    if !k_symbols_models[j].contains_key(&sym) {
-                        k_symbols_models[j][&255] = k_symbols_models[j][&255] + 1;
-                        continue;
-                    }
-
-                    let el_index = k_symbols_models[j].get_index_of(&sym).unwrap();
-                    let el_index = el_index as u8;
-
-                    encoder.encode(el_index.into(), &models[j], &mut compressed_writer)?;
-
-                    if j == 0 {
-                        k_symbols_models[j].swap_remove(&sym);
-                    } else {
-                        k_symbols_models[j][&sym] = k_symbols_models[j][&sym] + 1;
-                    }
-                }
-
-                let rho: u8 = 255;
-                let eof: u8 = 254;
-                k_symbols_models[i].insert(sym, 1);
-                k_symbols_models[i].insert(rho, 1);
-                k_symbols_models[i].insert(eof, 1);
-
-                continue 'encoder_loop;
-            }
-        }
-
-        for i in (0..MAX_K_CONTEXT).rev() {
-            if k_symbols_models[i].contains_key(&sym) {
-                let el_index = k_symbols_models[i].get_index_of(&sym).unwrap();
-                let el_index = el_index as u8;
-
-                encoder.encode(el_index.into(), &models[i], &mut compressed_writer)?;
-                if i == 0 {
-                    k_symbols_models[i].swap_remove_entry(&sym);
-                } else {
-                    k_symbols_models[i][&sym] = k_symbols_models[i][&sym] + 1;
-                }
-
-                continue 'encoder_loop;
-            } else {
-                let rho: u8 = 255;
-                let el_index = k_symbols_models[i].get_index_of(&rho).unwrap();
-                let el_index = el_index as u8;
-
-                encoder.encode(el_index.into(), &models[1], &mut compressed_writer)?;
-
-                k_symbols_models[1][&rho] = k_symbols_models[1][&rho] + 1;
-                k_symbols_models[1].insert(sym, 1);
-            }
-        }
-    }
-
-    let mut model_k0 = Model::builder()
-        .num_symbols(k_symbols_models[1].len() as u32)
-        .eof(EOFKind::EndAddOne)
-        .build();
-
-    let mut i = 0;
-    for (_, counter) in &k_symbols_models[1] {
-        for _ in 1..(*counter) {
-            model_k0.update_symbol(i);
-        }
-
-        i = i + 1;
-    }
-
-    let eof = 254;
-    let el_index = k_symbols_models[1].get_index_of(&eof).unwrap();
-    let el_index = el_index as u8;
-
-    encoder.encode(el_index.into(), &model_k0, &mut compressed_writer)?;
-    encoder.finish_encode(&mut compressed_writer)?;
-    compressed_writer.pad_to_byte()?;
-
-    // retrieves the bytes from the writer. This will
-    // be cleaner when bitbit updates. Not necessary if
-    // using files or a stream
-    Ok(compressed_writer.get_ref().get_ref().clone())
+struct Context {
+    model: Model,
+    seen_symbols: HashSet<u32>,
 }
 
-/// Decompresses the data
-fn decode(data: &[u8]) -> Result<Vec<u8>> {
-    let mut k_symbols_models: Vec<IndexMap<u8, i32>> = vec![];
+impl Context {
+    fn new() -> Self {
+        let mut model = Model::builder()
+            .num_symbols(258)
+            .eof(EOFKind::EndAddOne)
+            .build();
 
-    for _ in 0..MAX_K_CONTEXT {
-        k_symbols_models.push(IndexMap::new());
+        model.update_symbol(RHO);
+
+        Self {
+            model,
+            seen_symbols: HashSet::new(),
+        }
     }
-
-    for i in 0..256 {
-        let i = i as u8;
-        k_symbols_models[0].insert(i, 1);
-    }
-
-    let mut input_reader = BitReader::<_, MSB>::new(data);
-    let mut decoder = ArithmeticDecoder::new(48);
-    let mut decompressed_data = vec![];
-
-    'decoder_loop: while !decoder.finished() {
-        let mut models: Vec<Model> = vec![];
-
-        for i in 0..MAX_K_CONTEXT {
-            let model = Model::builder()
-                .num_symbols(k_symbols_models[i].len() as u32)
-                .eof(EOFKind::EndAddOne)
-                .build();
-
-            models.push(model);
-        }
-
-        for k in 1..MAX_K_CONTEXT {
-            let mut i = 0;
-            for (_, counter) in &k_symbols_models[k] {
-                for _ in 1..(*counter) {
-                    models[k].update_symbol(i);
-                }
-
-                i = i + 1;
-            }
-        }
-
-        for i in (1..MAX_K_CONTEXT).rev() {
-            if k_symbols_models[i - 1].len() == 0 {
-                continue;
-            }
-
-            if k_symbols_models[i].len() == 0 {
-                let idx = decoder.decode(&models[i - 1], &mut input_reader)?;
-
-                let value = k_symbols_models[i - 1].get_index(idx as usize).unwrap();
-                let sym = *value.0;
-
-                if sym == 255 {
-                    k_symbols_models[i][&255] = k_symbols_models[i][&255] + 1;
-                }
-
-                let mut j = i - 1;
-                while sym == 255 {
-                    let idx = decoder.decode(&models[j], &mut input_reader)?;
-
-                    let value = k_symbols_models[j].get_index(idx as usize).unwrap();
-                    let sym = *value.0;
-
-                    if sym == 255 {
-                        k_symbols_models[j][&255] = k_symbols_models[j][&255] + 1;
-                    }
-
-                    j = j + 1;
-                }
-
-                decompressed_data.push(sym);
-                if j == 0 {
-                    k_symbols_models[i - 1].swap_remove_entry(&sym);
-                } else {
-                    k_symbols_models[j][&sym] = k_symbols_models[j][&sym] + 1;
-                }
-
-                for k in (j + 1)..i {
-                    k_symbols_models[k].insert(sym, 1);
-                }
-
-                let rho: u8 = 255;
-                let eof: u8 = 254;
-                k_symbols_models[i].insert(sym, 1);
-                k_symbols_models[i].insert(rho, 1);
-                k_symbols_models[i].insert(eof, 1);
-
-                continue 'decoder_loop;
-            }
-
-            break;
-        }
-
-        let mut model_k = MAX_K_CONTEXT - 1;
-        let idx = decoder.decode(&models[model_k], &mut input_reader)?;
-        let value = k_symbols_models[model_k].get_index(idx as usize).unwrap();
-        let sym = *value.0;
-
-        // Verifica se o simbolo codificado é EOF
-        if sym == 254 {
-            decoder.set_finished();
-            continue;
-        }
-
-        if sym == 255 {
-            model_k = model_k - 1;
-            let initial_model_k = model_k;
-            let idx = decoder.decode(&models[model_k], &mut input_reader)?;
-            let value = k_symbols_models[model_k].get_index(idx as usize).unwrap();
-            let mut sym = *value.0;
-
-            if sym != 255 {
-                decompressed_data.push(sym);
-
-                if model_k == 0 {
-                    k_symbols_models[0].swap_remove_entry(&sym);
-                } else {
-                    k_symbols_models[model_k][&sym] = k_symbols_models[model_k][&sym] + 1;
-                }
-
-                k_symbols_models[model_k + 1][&(255 as u8)] =
-                    k_symbols_models[model_k + 1][&(255 as u8)] + 1;
-                k_symbols_models[model_k + 1].insert(sym, 1);
-                continue 'decoder_loop;
-            }
-
-            while sym == 255 {
-                k_symbols_models[model_k][&(255 as u8)] =
-                    k_symbols_models[model_k][&(255 as u8)] + 1;
-
-                model_k = model_k - 1;
-
-                let idx = decoder.decode(&models[model_k], &mut input_reader)?;
-                let value = k_symbols_models[model_k].get_index(idx as usize).unwrap();
-                sym = *value.0;
-            }
-
-            decompressed_data.push(sym);
-
-            if model_k == 0 {
-                k_symbols_models[0].swap_remove_entry(&sym);
-            } else {
-                k_symbols_models[model_k][&sym] = k_symbols_models[model_k][&sym] + 1;
-            }
-
-            // k_symbols_models[model_k + 1][&(255 as u8)] =
-            //     k_symbols_models[model_k + 1][&(255 as u8)] + 1;
-            for m in (model_k + 1)..initial_model_k {
-                k_symbols_models[m].insert(sym, 1);
-            }
-
-            continue 'decoder_loop;
-        }
-
-        decompressed_data.push(sym);
-        k_symbols_models[1][&sym] = k_symbols_models[1][&sym] + 1;
-    }
-
-    decompressed_data.pop(); // remove the EOF
-
-    Ok(decompressed_data)
 }
+
+struct PPMC {
+    contexts: HashMap<Vec<u8>, Context>,
+    minus_one: Model,
+    max_n: usize,
+}
+
+impl PPMC {
+
+    fn new(max_n: usize) -> Self {
+        let minus_one = Model::builder()
+            .num_symbols(258)
+            .eof(EOFKind::EndAddOne)
+            .build();
+
+        Self {
+            contexts: HashMap::new(),
+            minus_one,
+            max_n
+        }
+    }
+
+    fn encode(&mut self, data: &[u8], encoder: &mut ArithmeticEncoder, writer: &mut BitWriter<Cursor<Vec<u8>>>) -> Result<()> {
+        // Armazena os N últimos caracteres
+        // Ex: N = 3 ['e', 'n', 's']
+        let mut last_characters: Vec<u8> = Vec::with_capacity(self.max_n); 
+
+        for &byte in data {
+            let symbol = byte as u32;
+            let mut encoded = false;
+            // min() é usado para codificar corretamente os N primeiros bytes
+            let mut current_n = min(last_characters.len(), self.max_n);
+             
+            loop {
+                // Extrai a sequência de caracteres a ser observada no contexto atual
+                let context_key = last_characters[last_characters.len() - current_n..].to_vec();
+                
+                // Procura a sequência de caracteres no contexto atual, se não
+                // a encontrar, adiciona ao contexto.
+                // Presente: node contem uma referência que aponta para o contexto
+                //           presente dentro do Hash Map
+                // Não Presente: node contêm uma referência que aponta para o novo
+                //               contexto criado
+                let node = self.contexts.entry(context_key.clone()).or_insert_with(Context::new);
+                
+                // Verifica se o símbolo sendo processado já foi visto depois 
+                // do contexto atual
+                if node.seen_symbols.contains(&symbol) {
+                    // Se sim, codifica e vai para o próximo símbolo
+                    encoder.encode(symbol, &node.model, writer)?;
+                    encoded = true;
+                    break;
+                } else {
+                    // Se não, codifica o escape e desce de contexto
+                    encoder.encode(RHO, &node.model, writer)?;
+                }
+                if current_n == 0{
+                    break;
+                }
+                current_n -= 1;
+            }
+            
+            // Se o símbolo nunca foi encontrado, codifica para N = -1
+            if !encoded {
+                encoder.encode(symbol, &self.minus_one, writer)?;
+            }
+
+            // Atualização dos contextos
+            for order in 0..=min(last_characters.len(), self.max_n) {
+                // Define contexto atual
+                let context_key = last_characters[last_characters.len() - order..].to_vec();
+                // Atualiza contexto atual
+                if let Some(node) = self.contexts.get_mut(&context_key) {
+                    node.model.update_symbol(symbol);
+                    node.seen_symbols.insert(symbol);
+                }
+            }
+            
+            // Avança para o próximo símbolo
+            last_characters.push(byte);
+            if last_characters.len() > self.max_n {
+                last_characters.remove(0);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn decode(&mut self, decoder: &mut ArithmeticDecoder, reader: &mut BitReader<Cursor<Vec<u8>>, MSB>) -> Result<Vec<u8>> {
+        let mut output: Vec<u8> = Vec::new();
+        // Armazena os N últimos caracteres
+        let mut last_characters: Vec<u8> = Vec::with_capacity(self.max_n);
+        
+        'decode_loop: loop {
+            // min() é usado para decodificar corretamente os N primeiros bytes
+            let mut current_n = std::cmp::min(last_characters.len(), self.max_n);
+            let mut decoded_symbol: u32 = 0;
+            let mut found = false;
+
+            loop {
+                // Extrai a sequência de caracteres a ser observada no contexto atual
+                let context_key = last_characters[last_characters.len() - current_n..].to_vec();
+                
+                // Procura a sequência de caracteres a ser observada no contexto atual,
+                // se não a encontrar, adiciona ao contexto
+                let node = self.contexts.entry(context_key.clone()).or_insert_with(Context::new);
+
+                // Lê o stream e decodifica um símbolo baseado no modelo deste contexto
+                let symbol = decoder.decode(&node.model, reader)?;
+
+                // Verifica se o símbolo decodificado é o escape
+                if symbol == RHO {
+                    if current_n == 0 {
+                        // Se for escape no contexto 0, sai do loop para buscar
+                        // no contexto -1
+                        break;
+                    }
+                    // Desce de contexto
+                    current_n -= 1;
+                } else {
+                    // Se não for escape, encontramos o símbolo decodificado
+                    decoded_symbol = symbol;
+                    found = true;
+                    break;
+                }
+            }
+            
+            // Se não foi encontrado antes, decodifica para N = -1
+            if !found {
+                decoded_symbol = decoder.decode(&self.minus_one, reader)?;
+            }
+            
+            // Verifica se a compressão acabou
+            if decoded_symbol == EOF_SYMBOL {
+                break 'decode_loop;
+            }
+        
+            // Adiciona o byte decodificado a saída final
+            let byte = decoded_symbol as u8;
+            output.push(byte);
+            
+            for order in 0..=min(last_characters.len(), self.max_n) {
+                // Define contexto atual
+                let context_key = last_characters[last_characters.len() - order..].to_vec();
+                // Atualiza contexto atual
+                if let Some(node) = self.contexts.get_mut(&context_key) {
+                    node.model.update_symbol(decoded_symbol);
+                    node.seen_symbols.insert(decoded_symbol);
+                }
+            }
+            
+            // Avança para o próximo símbolo
+            last_characters.push(byte);
+            if last_characters.len() > self.max_n {
+                last_characters.remove(0);
+            }
+            
+        }
+
+        Ok(output)
+    }
+}
+
 
 fn main() {
-    let sample_bytes = MOCK_TEXT.bytes().into_iter().collect::<Vec<u8>>();
-    let compressed = encode(&sample_bytes).unwrap();
-    let decompressed = decode(&compressed).unwrap();
+    let input_path = "corpus/dickens"; 
 
-    let mut f = File::create("Compressed.dd").expect("Erro ao criar arquivo");
-    match f.write_all(&compressed) {
-        Ok(_) => println!("Comprimido com sucesso!"),
+    println!("Lendo arquivo: {}", input_path);
+    let sample_bytes = match fs::read(input_path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!("Erro ao ler o arquivo '{}': {}", input_path, e);
+            return;
+        }
+    };
+
+    let original_size = sample_bytes.len();
+    println!("Tamanho original: {} bytes\n", original_size);
+    
+    println!("{:-<60}", "");
+    println!("{:<10} | {:<20} | {:<15}", "Ordem (N)", "Tamanho Comprimido", "Razão (%)");
+    println!("{:-<60}", "");
+
+    for n in 1..=10 {
+        let mut ppmc_encoder = PPMC::new(n);
+        let compressed_cursor = Cursor::new(Vec::new());
+        let mut writer = BitWriter::new(compressed_cursor);
+        let mut encoder = ArithmeticEncoder::new(48);
+
+        // Executa a compressão
+        ppmc_encoder.encode(&sample_bytes, &mut encoder, &mut writer).unwrap();
+
+        // Finaliza o bitstream
+        encoder.encode(EOF_SYMBOL, &ppmc_encoder.minus_one, &mut writer).unwrap();
+        encoder.finish_encode(&mut writer).unwrap();
+        writer.pad_to_byte().unwrap();
+
+        // Calcula os resultados
+        let compressed_bytes = writer.get_ref().get_ref().clone();
+        let compressed_size = compressed_bytes.len();
+        let ratio = (compressed_size as f64 / original_size as f64) * 100.0;
+
+        println!("{:<10} | {:<20} | {:.2}%", n, compressed_size, ratio);
+    }
+    
+    println!("{:-<60}", "");
+}
+
+/*
+fn main() {
+    let input_path = "corpus/dickens"; 
+
+    println!("Lendo arquivo: {}", input_path);
+    
+    // Lê o arquivo inteiro para a memória como Vec<u8>
+    let sample_bytes = match fs::read(input_path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!("Erro ao ler o arquivo '{}': {}", input_path, e);
+            return;
+        }
+    };
+
+    println!("Tamanho original: {} bytes", sample_bytes.len());
+
+    // Setup Encoder
+    let mut ppmc_encoder = PPMC::new(5);
+    let compressed_cursor = Cursor::new(Vec::new());
+    let mut writer = BitWriter::new(compressed_cursor);
+    let mut encoder = ArithmeticEncoder::new(48);
+
+    println!("Comprimindo...");
+    ppmc_encoder.encode(&sample_bytes, &mut encoder, &mut writer).unwrap();
+
+    const EOF_SYMBOL: u32 = 257;
+    encoder.encode(EOF_SYMBOL, &ppmc_encoder.minus_one, &mut writer).unwrap();
+    encoder.finish_encode(&mut writer).unwrap();
+    writer.pad_to_byte().unwrap();
+
+    let compressed_bytes = writer.get_ref().get_ref().clone();
+
+    // Escrevendo arquivo comprimido
+    let mut f_comp = File::create("Compressed.dd").expect("Erro ao criar arquivo");
+    match f_comp.write_all(&compressed_bytes) {
+        Ok(_) => println!("Comprimido com sucesso! Tamanho final: {} bytes", compressed_bytes.len()),
         Err(_) => println!("Erro ao salvar arquivo comprimido"),
     };
 
-    let mut f = File::create("Decompressed.txt").expect("Erro ao criar arquivo");
-    match f.write_all(&decompressed) {
+    // Setup do decoder
+    println!("Descomprimindo...");
+    let mut ppmc_decoder = PPMC::new(5); 
+    let cursor = Cursor::new(compressed_bytes.clone()); 
+    let mut reader = BitReader::<_, MSB>::new(cursor);
+    let mut decoder = ArithmeticDecoder::new(48);
+
+    let decompressed_bytes = ppmc_decoder.decode(&mut decoder, &mut reader).unwrap();
+
+    // Escrevendo arquivo descomprimido
+    let mut f_decomp = File::create("Decompressed.out").expect("Erro ao criar arquivo");
+    match f_decomp.write_all(&decompressed_bytes) {
         Ok(_) => println!("Descomprimido com sucesso!"),
-        Err(_) => println!("Erro ao comprimir arquivo"),
+        Err(_) => println!("Erro ao salvar arquivo descomprimido"),
     }
-}
+    
+    // Verificação de integridade
+    if sample_bytes == decompressed_bytes {
+        println!("Os bytes descomprimidos são idênticos aos originais!");
+    } else {
+        println!("Os bytes descomprimidos não batem com os originais!");
+    }
+}*/
