@@ -60,12 +60,13 @@ impl PPMC {
         let mut metrics_file = File::create(format!("metrics_order_{}.csv", self.max_n))
             .expect("Erro ao escrever arquivo de métrica");
         metrics_file.write(b"n,comprimento_medio\n")?;
-        let mut metrics: Vec<(i32, f64)> = vec![];
+        let mut metrics: Vec<(i32, f64)> = Vec::with_capacity(data.len());
         // Armazena os N últimos caracteres
         // Ex: N = 3 ['e', 'n', 's']
         let mut last_characters: Vec<u8> = Vec::with_capacity(self.max_n);
 
         let mut last_mean_progressive_length = 0.0;
+        let mut last_window_bit_count = 0;
 
         let mut current_pos = 1;
         for &byte in data {
@@ -124,15 +125,20 @@ impl PPMC {
 
             // Add metrics to file
             let total_attributed_bits = writer.get_ref().position();
+
             let mean_progressive_length = (total_attributed_bits as f64) / current_pos as f64;
             metrics.push((current_pos, mean_progressive_length));
 
             if current_pos % 1000 == 0 {
+                let window_bit_count = total_attributed_bits - last_window_bit_count;
+                // Get mean progressive length of window
+                let mean_progressive_length = (window_bit_count as f64) / 1000.0;
+
                 if last_mean_progressive_length != 0.0 {
                     let percentile_mpl_upper_bound = 0.01 * last_mean_progressive_length;
 
                     // If the current mean progressive length is bigger than 1 percent of the last one
-                    if (mean_progressive_length - last_mean_progressive_length)
+                    if (last_mean_progressive_length - mean_progressive_length)
                         > percentile_mpl_upper_bound
                     {
                         self.contexts.clear();
@@ -141,6 +147,7 @@ impl PPMC {
                 }
 
                 last_mean_progressive_length = mean_progressive_length;
+                last_window_bit_count = window_bit_count;
             }
 
             // Avança para o próximo símbolo
@@ -169,6 +176,7 @@ impl PPMC {
         let mut last_characters: Vec<u8> = Vec::with_capacity(self.max_n);
 
         let mut last_mean_progressive_length = 0.0;
+        let mut last_window_bit_count = 0;
 
         let mut current_pos = 1;
 
@@ -234,16 +242,17 @@ impl PPMC {
                 }
             }
 
-            // Each time it decodes
-            let total_attributed_bits = reader.get_ref().position();
-            let mean_progressive_length = (total_attributed_bits as f64) / current_pos as f64;
-
             if current_pos % 1000 == 0 {
+                let total_attributed_bits = reader.get_ref().position();
+                let window_bit_count = total_attributed_bits - last_window_bit_count;
+                // Get mean progressive length of window
+                let mean_progressive_length = (window_bit_count as f64) / 1000.0;
+
                 if last_mean_progressive_length != 0.0 {
                     let percentile_mpl_upper_bound = 0.01 * last_mean_progressive_length;
 
                     // If the current mean progressive length is bigger than 1 percent of the last one
-                    if (mean_progressive_length - last_mean_progressive_length)
+                    if (last_mean_progressive_length - mean_progressive_length)
                         > percentile_mpl_upper_bound
                     {
                         self.contexts.clear();
@@ -252,6 +261,7 @@ impl PPMC {
                 }
 
                 last_mean_progressive_length = mean_progressive_length;
+                last_window_bit_count = window_bit_count;
             }
 
             // Avança para o próximo símbolo
