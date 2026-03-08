@@ -9,6 +9,9 @@ use std::{
 
 const RHO: u32 = 256;
 const EOF_SYMBOL: u32 = 257;
+const DO_RESET_SYMBOL: u32 = 258;
+const DEBUG_MODE: bool = false;
+const CONTEXT_TO_USE: usize = 4;
 
 struct Context {
     model: Model,
@@ -18,7 +21,7 @@ struct Context {
 impl Context {
     fn new() -> Self {
         let mut model = Model::builder()
-            .num_symbols(258)
+            .num_symbols(259)
             .eof(EOFKind::EndAddOne)
             .build();
 
@@ -40,7 +43,7 @@ struct PPMC {
 impl PPMC {
     fn new(max_n: usize) -> Self {
         let minus_one = Model::builder()
-            .num_symbols(258)
+            .num_symbols(259)
             .eof(EOFKind::EndAddOne)
             .build();
 
@@ -59,15 +62,17 @@ impl PPMC {
     ) -> Result<()> {
         let mut metrics_file = File::create(format!("metrics_order_{}.csv", self.max_n))
             .expect("Erro ao escrever arquivo de métrica");
-        metrics_file.write(b"n,comprimento_medio\n")?;
+        if DEBUG_MODE {
+            metrics_file.write(b"n,comprimento_medio\n")?;
+        }
         let mut metrics: Vec<(i32, f64)> = Vec::with_capacity(data.len());
         // Armazena os N últimos caracteres
         // Ex: N = 3 ['e', 'n', 's']
         let mut last_characters: Vec<u8> = Vec::with_capacity(self.max_n);
 
-        let mut last_mean_progressive_length = 0.0;
+        let last_mean_progressive_length = 0.0;
 
-        let mut last_total_attributed_bits = 0;
+        let last_total_attributed_bits = 0;
 
         let mut current_pos = 1;
         for &byte in data {
@@ -134,24 +139,34 @@ impl PPMC {
                 let window_bit_count = total_attributed_bits - last_total_attributed_bits;
                 // Get mean progressive length of window
                 let mean_progressive_length = (window_bit_count as f64) / 1000.0;
+                let mut do_reset = false;
 
                 if last_mean_progressive_length != 0.0 {
                     let percentile_mpl_upper_bound =
-                        last_mean_progressive_length + 0.25 * last_mean_progressive_length;
+                        last_mean_progressive_length + 1.0 * last_mean_progressive_length;
 
                     // If the current mean progressive length is bigger than 1 percent of the last one
                     if mean_progressive_length > percentile_mpl_upper_bound {
-                        self.contexts.clear();
-                        last_characters = Vec::with_capacity(self.max_n);
                         // println!(
                         //     "[{current_pos}] {} - {}",
                         //     mean_progressive_length, last_mean_progressive_length
                         // );
+                        do_reset = true;
                     }
                 }
 
-                last_mean_progressive_length = mean_progressive_length;
-                last_total_attributed_bits = total_attributed_bits;
+                if do_reset {
+                    for order in 0..=min(last_characters.len(), self.max_n) {
+                        let context_key = last_characters[last_characters.len() - order..].to_vec();
+                        if let Some(node) = self.contexts.get_mut(&context_key) {
+                            encoder.encode(RHO, &node.model, writer)?;
+                        }
+                    }
+
+                    encoder.encode(DO_RESET_SYMBOL, &self.minus_one, writer)?;
+                    self.contexts.clear();
+                    last_characters = Vec::with_capacity(self.max_n);
+                }
             }
 
             // Avança para o próximo símbolo
@@ -163,8 +178,10 @@ impl PPMC {
             current_pos = current_pos + 1;
         }
 
-        for metric in metrics {
-            metrics_file.write((format!("{},{}\n", metric.0, metric.1)).as_bytes())?;
+        if DEBUG_MODE {
+            for metric in metrics {
+                metrics_file.write((format!("{},{}\n", metric.0, metric.1)).as_bytes())?;
+            }
         }
 
         Ok(())
@@ -179,11 +196,7 @@ impl PPMC {
         // Armazena os N últimos caracteres
         let mut last_characters: Vec<u8> = Vec::with_capacity(self.max_n);
 
-        let mut last_mean_progressive_length = 0.0;
-
         let mut current_pos = 1;
-
-        let mut last_total_attributed_bits = 0;
 
         'decode_loop: loop {
             // min() é usado para decodificar corretamente os N primeiros bytes
@@ -233,9 +246,18 @@ impl PPMC {
                 break 'decode_loop;
             }
 
+            if decoded_symbol == DO_RESET_SYMBOL {
+                self.contexts.clear();
+                last_characters = Vec::with_capacity(self.max_n);
+                continue 'decode_loop;
+            }
+
             // Adiciona o byte decodificado a saída final
             let byte = decoded_symbol as u8;
-            output.push(byte);
+
+            if !(decoded_symbol == DO_RESET_SYMBOL) {
+                output.push(byte);
+            }
 
             for order in 0..=min(last_characters.len(), self.max_n) {
                 // Define contexto atual
@@ -245,27 +267,6 @@ impl PPMC {
                     node.model.update_symbol(decoded_symbol);
                     node.seen_symbols.insert(decoded_symbol);
                 }
-            }
-
-            if current_pos % 1000 == 0 {
-                let total_attributed_bits = reader.get_ref().position();
-                let window_bit_count = total_attributed_bits - last_total_attributed_bits;
-                // Get mean progressive length of window
-                let mean_progressive_length = (window_bit_count as f64) / 1000.0;
-
-                if last_mean_progressive_length != 0.0 {
-                    let percentile_mpl_upper_bound =
-                        last_mean_progressive_length + 0.25 * last_mean_progressive_length;
-
-                    // If the current mean progressive length is bigger than 1 percent of the last one
-                    if mean_progressive_length > percentile_mpl_upper_bound {
-                        self.contexts.clear();
-                        last_characters = Vec::with_capacity(self.max_n);
-                    }
-                }
-
-                last_mean_progressive_length = mean_progressive_length;
-                last_total_attributed_bits = total_attributed_bits;
             }
 
             // Avança para o próximo símbolo
@@ -354,7 +355,7 @@ fn main() {
     println!("Tamanho original: {} bytes", sample_bytes.len());
 
     // Setup Encoder
-    let mut ppmc_encoder = PPMC::new(5);
+    let mut ppmc_encoder = PPMC::new(CONTEXT_TO_USE);
     let compressed_cursor = Cursor::new(Vec::new());
     let mut writer = BitWriter::new(compressed_cursor);
     let mut encoder = ArithmeticEncoder::new(48);
@@ -385,7 +386,7 @@ fn main() {
 
     // Setup do decoder
     println!("Descomprimindo...");
-    let mut ppmc_decoder = PPMC::new(5);
+    let mut ppmc_decoder = PPMC::new(CONTEXT_TO_USE);
     let cursor = Cursor::new(compressed_bytes.clone());
     let mut reader = BitReader::<_, MSB>::new(cursor);
     let mut decoder = ArithmeticDecoder::new(48);
