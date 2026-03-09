@@ -5,6 +5,7 @@ use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
     io::{Cursor, Result, Write},
+    time::Instant
 };
 
 const RHO: u32 = 256;
@@ -142,11 +143,11 @@ impl PPMC {
             let mean_progressive_length = (total_attributed_bits as f64) / current_pos as f64;
             metrics.push((current_pos, mean_progressive_length));
             
-            // Avalia a compressão a cada 1000 símbolos processados
-            if current_pos % 1000 == 0 {
+            // Avalia a compressão a cada 25000 símbolos processados
+            if current_pos % 25000 == 0 {
                 let window_bit_count = total_attributed_bits - last_total_attributed_bits;
                 // Calcula o comprimento médio da janela atual
-                let mean_progressive_length = (window_bit_count as f64) / 1000.0;
+                let mean_progressive_length = (window_bit_count as f64) / 25000.0;
                 let mut do_reset = false;
                 
                 if last_mean_progressive_length != 0.0 {
@@ -337,22 +338,28 @@ fn main() {
     let mut encoder = ArithmeticEncoder::new(48);
 
     println!("Comprimindo...");
+    let start_encoding = Instant::now();
     ppmc_encoder
         .encode(&sample_bytes, &mut encoder, &mut writer)
         .unwrap();
     
     encoder.finish_encode(&mut writer).unwrap();
     writer.pad_to_byte().unwrap();
+    let encoding_duration = start_encoding.elapsed();
 
     let compressed_bytes = writer.get_ref().get_ref().clone();
 
     // Escrevendo arquivo comprimido
     let mut f_comp = File::create("Compressed.dd").expect("Erro ao criar arquivo");
     match f_comp.write_all(&compressed_bytes) {
-        Ok(_) => println!(
-            "Comprimido com sucesso! Tamanho final: {} bytes",
-            compressed_bytes.len()
-        ),
+        Ok(_) => { 
+            let total_compressed_bits = (compressed_bytes.len() * 8) as f64;
+            let total_original_symbols = sample_bytes.len() as f64;
+            let bits_per_symbol = total_compressed_bits / total_original_symbols;
+
+            println!(
+                "Comprimido com sucesso! Tamanho final: {} bytes | Tempo de compressão: {:.2}s | Comprimento médio final: {:.4} bits/símbolo", compressed_bytes.len(), encoding_duration.as_secs_f64() , bits_per_symbol);
+        }
         Err(_) => println!("Erro ao salvar arquivo comprimido"),
     };
 
@@ -363,12 +370,14 @@ fn main() {
     let mut reader = BitReader::<_, MSB>::new(cursor);
     let mut decoder = ArithmeticDecoder::new(48);
 
+    let start_decoding = Instant::now();
     let decompressed_bytes = ppmc_decoder.decode(&mut decoder, &mut reader).unwrap();
+    let decoding_duration = start_decoding.elapsed();
 
     // Escrevendo arquivo descomprimido
     let mut f_decomp = File::create("Decompressed.out").expect("Erro ao criar arquivo");
     match f_decomp.write_all(&decompressed_bytes) {
-        Ok(_) => println!("Descomprimido com sucesso!"),
+        Ok(_) => println!("Descomprimido com sucesso! Tempo de descompressão: {:.2}s", decoding_duration.as_secs_f64()),
         Err(_) => println!("Erro ao salvar arquivo descomprimido"),
     }
 
