@@ -1,14 +1,17 @@
-use std::{
-    fs::{self, File},
-    io::{Cursor, Result, Write},
-    collections::{HashMap, HashSet},
-    cmp::min,
-};
 use arcode::{ArithmeticDecoder, ArithmeticEncoder, EOFKind, Model};
 use bitbit::{BitReader, BitWriter, MSB};
+use std::{
+    cmp::min,
+    collections::{HashMap, HashSet},
+    fs::{self, File},
+    io::{Cursor, Result, Write},
+};
 
 const RHO: u32 = 256;
 const EOF_SYMBOL: u32 = 257;
+const DO_RESET_SYMBOL: u32 = 258;
+const DEBUG_MODE: bool = true;
+const CONTEXT_TO_USE: usize = 3;
 
 struct Context {
     model: Model,
@@ -18,7 +21,7 @@ struct Context {
 impl Context {
     fn new() -> Self {
         let mut model = Model::builder()
-            .num_symbols(258)
+            .num_symbols(259)
             .eof(EOFKind::EndAddOne)
             .build();
 
@@ -38,44 +41,63 @@ struct PPMC {
 }
 
 impl PPMC {
-
     fn new(max_n: usize) -> Self {
         let minus_one = Model::builder()
-            .num_symbols(258)
+            .num_symbols(259)
             .eof(EOFKind::EndAddOne)
             .build();
 
         Self {
             contexts: HashMap::new(),
             minus_one,
-            max_n
+            max_n,
         }
     }
 
-    fn encode(&mut self, data: &[u8], encoder: &mut ArithmeticEncoder, writer: &mut BitWriter<Cursor<Vec<u8>>>) -> Result<()> {
+    fn encode(
+        &mut self,
+        data: &[u8],
+        encoder: &mut ArithmeticEncoder,
+        writer: &mut BitWriter<Cursor<Vec<u8>>>,
+    ) -> Result<()> {
+        let mut metrics_file = File::create(format!("metrics_order_{}.csv", self.max_n))
+            .expect("Erro ao escrever arquivo de métrica");
+        if DEBUG_MODE {
+            metrics_file.write(b"n,comprimento_medio\n")?;
+        }
+
+        let mut metrics: Vec<(i32, f64)> = Vec::with_capacity(data.len());
         // Armazena os N últimos caracteres
         // Ex: N = 3 ['e', 'n', 's']
-        let mut last_characters: Vec<u8> = Vec::with_capacity(self.max_n); 
+        let mut last_characters: Vec<u8> = Vec::with_capacity(self.max_n);
 
+        let mut last_mean_progressive_length = 0.0;
+        let mut last_total_attributed_bits = 0;
+
+        let mut current_pos = 1;
+        
         for &byte in data {
             let symbol = byte as u32;
             let mut encoded = false;
             // min() é usado para codificar corretamente os N primeiros bytes
             let mut current_n = min(last_characters.len(), self.max_n);
-             
+
             loop {
                 // Extrai a sequência de caracteres a ser observada no contexto atual
                 let context_key = last_characters[last_characters.len() - current_n..].to_vec();
-                
+
                 // Procura a sequência de caracteres no contexto atual, se não
                 // a encontrar, adiciona ao contexto.
                 // Presente: node contem uma referência que aponta para o contexto
                 //           presente dentro do Hash Map
                 // Não Presente: node contêm uma referência que aponta para o novo
                 //               contexto criado
-                let node = self.contexts.entry(context_key.clone()).or_insert_with(Context::new);
-                
-                // Verifica se o símbolo sendo processado já foi visto depois 
+                let node = self
+                    .contexts
+                    .entry(context_key.clone())
+                    .or_insert_with(Context::new);
+
+                // Verifica se o símbolo sendo processado já foi visto depois
                 // do contexto atual
                 if node.seen_symbols.contains(&symbol) {
                     // Se sim, codifica e vai para o próximo símbolo
@@ -86,12 +108,12 @@ impl PPMC {
                     // Se não, codifica o escape e desce de contexto
                     encoder.encode(RHO, &node.model, writer)?;
                 }
-                if current_n == 0{
+                if current_n == 0 {
                     break;
                 }
                 current_n -= 1;
             }
-            
+
             // Se o símbolo nunca foi encontrado, codifica para N = -1
             if !encoded {
                 encoder.encode(symbol, &self.minus_one, writer)?;
@@ -107,22 +129,108 @@ impl PPMC {
                     node.seen_symbols.insert(symbol);
                 }
             }
-            
+
             // Avança para o próximo símbolo
             last_characters.push(byte);
             if last_characters.len() > self.max_n {
                 last_characters.remove(0);
+            }
+
+            // Add metrics to file
+            let total_attributed_bits = writer.get_ref().position();
+
+            let mean_progressive_length = (total_attributed_bits as f64) / current_pos as f64;
+            metrics.push((current_pos, mean_progressive_length));
+            
+            // Avalia a compressão a cada 1000 símbolos processados
+            if current_pos % 1000 == 0 {
+                let window_bit_count = total_attributed_bits - last_total_attributed_bits;
+                // Calcula o comprimento médio da janela atual
+                let mean_progressive_length = (window_bit_count as f64) / 1000.0;
+                let mut do_reset = false;
+                
+                if last_mean_progressive_length != 0.0 {
+                    // Define o limite para o reset como uma piora de 400% do comprimento
+                    // médio
+                    let percentile_mpl_upper_bound =
+                        last_mean_progressive_length + 4.0 * last_mean_progressive_length;
+
+                    // Se o comprimento médio atual ultrapassar o limite de piora,
+                    // sinaliza a necessidade de um reset
+                    if mean_progressive_length > percentile_mpl_upper_bound {
+                         println!(
+                             "[{current_pos}] {} - {}",
+                             mean_progressive_length, last_mean_progressive_length
+                         );
+                        do_reset = true;
+                    }
+                }
+                
+                // Atualiza para a próxima verificação de reset
+                last_mean_progressive_length = mean_progressive_length;
+                last_total_attributed_bits = total_attributed_bits;
+                
+                if do_reset {
+                    // Desce por todos os contextos do maior para o menor codificando o
+                    // escape até chegar no contexto -1
+                    for order in (0..=min(last_characters.len(), self.max_n)).rev() {
+                        let context_key = last_characters[last_characters.len() - order..].to_vec();
+                        let node = self
+                            .contexts
+                            .entry(context_key.clone())
+                            .or_insert_with(Context::new);
+                            encoder.encode(RHO, &node.model, writer)?;
+                    }
+                    // Codifica o símbolo de reset na ordem -1
+                    encoder.encode(DO_RESET_SYMBOL, &self.minus_one, writer)?;
+                    // Limpa todos os contextos acumulados
+                    self.contexts.clear();
+
+                }
+            }
+
+
+            current_pos = current_pos + 1;
+        }
+        
+        // Codificação do EOD
+        let mut eof_n = min(last_characters.len(), self.max_n);
+        
+        // Desce para o contexto -1
+        loop {
+            let context_key = last_characters[last_characters.len() - eof_n..].to_vec();
+            let node = self.contexts.entry(context_key).or_insert_with(Context::new);
+            encoder.encode(RHO, &node.model, writer)?;
+            
+            if eof_n == 0 {
+                break;
+            }
+            eof_n -= 1;
+        }
+
+        // Codifica o EOF no contexto -1
+        encoder.encode(EOF_SYMBOL, &self.minus_one, writer)?;
+
+        if DEBUG_MODE {
+            for metric in metrics {
+                metrics_file.write((format!("{},{}\n", metric.0, metric.1)).as_bytes())?;
             }
         }
 
         Ok(())
     }
 
-    fn decode(&mut self, decoder: &mut ArithmeticDecoder, reader: &mut BitReader<Cursor<Vec<u8>>, MSB>) -> Result<Vec<u8>> {
+    fn decode(
+        &mut self,
+        decoder: &mut ArithmeticDecoder,
+        reader: &mut BitReader<Cursor<Vec<u8>>, MSB>,
+    ) -> Result<Vec<u8>> {
         let mut output: Vec<u8> = Vec::new();
         // Armazena os N últimos caracteres
         let mut last_characters: Vec<u8> = Vec::with_capacity(self.max_n);
-        
+
+        let mut current_pos = 1;
+
         'decode_loop: loop {
             // min() é usado para decodificar corretamente os N primeiros bytes
             let mut current_n = std::cmp::min(last_characters.len(), self.max_n);
@@ -132,10 +240,13 @@ impl PPMC {
             loop {
                 // Extrai a sequência de caracteres a ser observada no contexto atual
                 let context_key = last_characters[last_characters.len() - current_n..].to_vec();
-                
+
                 // Procura a sequência de caracteres a ser observada no contexto atual,
                 // se não a encontrar, adiciona ao contexto
-                let node = self.contexts.entry(context_key.clone()).or_insert_with(Context::new);
+                let node = self
+                    .contexts
+                    .entry(context_key.clone())
+                    .or_insert_with(Context::new);
 
                 // Lê o stream e decodifica um símbolo baseado no modelo deste contexto
                 let symbol = decoder.decode(&node.model, reader)?;
@@ -156,94 +267,58 @@ impl PPMC {
                     break;
                 }
             }
-            
+
             // Se não foi encontrado antes, decodifica para N = -1
             if !found {
                 decoded_symbol = decoder.decode(&self.minus_one, reader)?;
             }
-            
+
             // Verifica se a compressão acabou
             if decoded_symbol == EOF_SYMBOL {
+                decoder.set_finished();
                 break 'decode_loop;
             }
-        
+            
+            // Se o decodificador encontrou um rese, limpa os contextos
+            if decoded_symbol == DO_RESET_SYMBOL {
+                self.contexts.clear();
+                continue 'decode_loop;
+            }
+
             // Adiciona o byte decodificado a saída final
             let byte = decoded_symbol as u8;
-            output.push(byte);
             
+            // Evita adicionar o símbolo de controle a saída
+            if !(decoded_symbol == DO_RESET_SYMBOL) {
+                output.push(byte);
+            }
+            
+            // Atualização dos contextos do decoder
             for order in 0..=min(last_characters.len(), self.max_n) {
-                // Define contexto atual
                 let context_key = last_characters[last_characters.len() - order..].to_vec();
-                // Atualiza contexto atual
                 if let Some(node) = self.contexts.get_mut(&context_key) {
                     node.model.update_symbol(decoded_symbol);
                     node.seen_symbols.insert(decoded_symbol);
                 }
             }
-            
+
             // Avança para o próximo símbolo
             last_characters.push(byte);
             if last_characters.len() > self.max_n {
                 last_characters.remove(0);
             }
-            
+            current_pos = current_pos + 1;
         }
 
         Ok(output)
     }
 }
 
-
 fn main() {
-    let input_path = "corpus/dickens"; 
+    let input_path = "silesia.tar";
 
     println!("Lendo arquivo: {}", input_path);
-    let sample_bytes = match fs::read(input_path) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            eprintln!("Erro ao ler o arquivo '{}': {}", input_path, e);
-            return;
-        }
-    };
 
-    let original_size = sample_bytes.len();
-    println!("Tamanho original: {} bytes\n", original_size);
-    
-    println!("{:-<60}", "");
-    println!("{:<10} | {:<20} | {:<15}", "Ordem (N)", "Tamanho Comprimido", "Razão (%)");
-    println!("{:-<60}", "");
-
-    for n in 1..=10 {
-        let mut ppmc_encoder = PPMC::new(n);
-        let compressed_cursor = Cursor::new(Vec::new());
-        let mut writer = BitWriter::new(compressed_cursor);
-        let mut encoder = ArithmeticEncoder::new(48);
-
-        // Executa a compressão
-        ppmc_encoder.encode(&sample_bytes, &mut encoder, &mut writer).unwrap();
-
-        // Finaliza o bitstream
-        encoder.encode(EOF_SYMBOL, &ppmc_encoder.minus_one, &mut writer).unwrap();
-        encoder.finish_encode(&mut writer).unwrap();
-        writer.pad_to_byte().unwrap();
-
-        // Calcula os resultados
-        let compressed_bytes = writer.get_ref().get_ref().clone();
-        let compressed_size = compressed_bytes.len();
-        let ratio = (compressed_size as f64 / original_size as f64) * 100.0;
-
-        println!("{:<10} | {:<20} | {:.2}%", n, compressed_size, ratio);
-    }
-    
-    println!("{:-<60}", "");
-}
-
-/*
-fn main() {
-    let input_path = "corpus/dickens"; 
-
-    println!("Lendo arquivo: {}", input_path);
-    
     // Lê o arquivo inteiro para a memória como Vec<u8>
     let sample_bytes = match fs::read(input_path) {
         Ok(bytes) => bytes,
@@ -256,16 +331,16 @@ fn main() {
     println!("Tamanho original: {} bytes", sample_bytes.len());
 
     // Setup Encoder
-    let mut ppmc_encoder = PPMC::new(5);
+    let mut ppmc_encoder = PPMC::new(CONTEXT_TO_USE);
     let compressed_cursor = Cursor::new(Vec::new());
     let mut writer = BitWriter::new(compressed_cursor);
     let mut encoder = ArithmeticEncoder::new(48);
 
     println!("Comprimindo...");
-    ppmc_encoder.encode(&sample_bytes, &mut encoder, &mut writer).unwrap();
-
-    const EOF_SYMBOL: u32 = 257;
-    encoder.encode(EOF_SYMBOL, &ppmc_encoder.minus_one, &mut writer).unwrap();
+    ppmc_encoder
+        .encode(&sample_bytes, &mut encoder, &mut writer)
+        .unwrap();
+    
     encoder.finish_encode(&mut writer).unwrap();
     writer.pad_to_byte().unwrap();
 
@@ -274,14 +349,17 @@ fn main() {
     // Escrevendo arquivo comprimido
     let mut f_comp = File::create("Compressed.dd").expect("Erro ao criar arquivo");
     match f_comp.write_all(&compressed_bytes) {
-        Ok(_) => println!("Comprimido com sucesso! Tamanho final: {} bytes", compressed_bytes.len()),
+        Ok(_) => println!(
+            "Comprimido com sucesso! Tamanho final: {} bytes",
+            compressed_bytes.len()
+        ),
         Err(_) => println!("Erro ao salvar arquivo comprimido"),
     };
 
     // Setup do decoder
     println!("Descomprimindo...");
-    let mut ppmc_decoder = PPMC::new(5); 
-    let cursor = Cursor::new(compressed_bytes.clone()); 
+    let mut ppmc_decoder = PPMC::new(CONTEXT_TO_USE);
+    let cursor = Cursor::new(compressed_bytes.clone());
     let mut reader = BitReader::<_, MSB>::new(cursor);
     let mut decoder = ArithmeticDecoder::new(48);
 
@@ -293,11 +371,11 @@ fn main() {
         Ok(_) => println!("Descomprimido com sucesso!"),
         Err(_) => println!("Erro ao salvar arquivo descomprimido"),
     }
-    
+
     // Verificação de integridade
     if sample_bytes == decompressed_bytes {
         println!("Os bytes descomprimidos são idênticos aos originais!");
     } else {
         println!("Os bytes descomprimidos não batem com os originais!");
     }
-}*/
+}
